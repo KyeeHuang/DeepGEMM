@@ -163,7 +163,8 @@ def construct_k_grouped_wgrad(m: int, n: int, k_sizes: List[int]) -> \
 
 def test_gemm() -> None:
     print('Testing GEMM:')
-    for m in (64, 128, 4096):
+    # for m in (64, 128, 4096):
+    for m in (4, 8, 16, 24, 32, 64):
         for k, n in [(576, 7168), (7168, 2112), (1536, 24576), (512, 32768), (16384, 7168), (7168, 4096), (2048, 7168)]:
             x_fp8, y_fp8, out, ref_out = construct(m, k, n)
             deep_gemm.gemm_fp8_fp8_bf16_nt(x_fp8, y_fp8, out)
@@ -178,6 +179,29 @@ def test_gemm() -> None:
                 deep_gemm.gemm_fp8_fp8_bf16_nt(x_fp8, y_fp8, out)
 
             t = bench_kineto(test_func, 'fp8_gemm', suppress_kineto_output=True)
+            print(f' > Performance (m={m:5}, n={n:5}, k={k:5}): {t * 1e6:4.0f} us | '
+                  f'throughput: {2 * m * n * k / t / 1e12:4.0f} TFLOPS, '
+                  f'{(m * k + k * n + m * n * 2) / 1e9 / t:4.0f} GB/s')
+    print()
+
+def test_gemm_swapab() -> None:
+    print('Testing GEMM(swapab):')
+    # for m in (64, 128, 4096):
+    for m in (4, 8, 16, 24, 32, 64):
+        for k, n in [(576, 7168), (7168, 2112), (1536, 24576), (512, 32768), (16384, 7168), (7168, 4096), (2048, 7168)]:
+            x_fp8, y_fp8, out, ref_out = construct(m, k, n)
+            deep_gemm.gemm_fp8_fp8_bf16_nt_swapab(y_fp8, x_fp8, out)
+            diff = calc_diff(out, ref_out)
+            assert diff < 0.001, f'{m=}, {k=}, {n=}, {diff:.5f}'
+
+            # Construct new tensors only once to avoid L2 cache acceleration (creating them puts them in L2)
+            x_fp8, y_fp8, out, ref_out = construct(m, k, n)
+
+            # noinspection PyShadowingNames
+            def test_func():
+                deep_gemm.gemm_fp8_fp8_bf16_nt_swapab(y_fp8, x_fp8, out)
+
+            t = bench_kineto(test_func, 'fp8_gemm_kernel_swapab', suppress_kineto_output=True)
             print(f' > Performance (m={m:5}, n={n:5}, k={k:5}): {t * 1e6:4.0f} us | '
                   f'throughput: {2 * m * n * k / t / 1e12:4.0f} TFLOPS, '
                   f'{(m * k + k * n + m * n * 2) / 1e9 / t:4.0f} GB/s')
@@ -211,10 +235,14 @@ def test_m_grouped_gemm_contiguous() -> None:
 def test_m_grouped_gemm_masked() -> None:
     print('Testing grouped masked GEMM:')
 
-    for num_groups, m in ((1, 1024), (2, 512), (4, 256)):
+    # for num_groups, m in ((1, 1024), (2, 512), (4, 256)):
+    for num_groups, m in ((1, 4), (1, 8), (1, 16), (4, 32), (4, 64),
+                          (2, 4), (2, 8), (2, 16), (2, 32), (2, 64), 
+                          (4, 4), (4, 8), (4, 16), (4, 32), (4, 64)):
         for k, n in ((7168, 4096), (2048, 7168), ):
             # Test correctness
-            masked_m_candidates = list(filter(lambda candidate: candidate <= m, (64, 128, 192, 256, 320, 384)))
+            # masked_m_candidates = list(filter(lambda candidate: candidate <= m, (64, 128, 192, 256, 320, 384)))
+            masked_m_candidates = list(filter(lambda candidate: candidate <= m, (4, 8, 12, 16, 20, 24, 28, 32, 64)))
             for i in range(10):
                 x_fp8, y_fp8, out, ref_out = construct_masked_grouped(num_groups, m, k, n)
                 masked_m = torch.empty((num_groups, ), device='cuda', dtype=torch.int)
@@ -236,6 +264,45 @@ def test_m_grouped_gemm_masked() -> None:
 
             # Test performance with fixed shapes
             t = bench_kineto(test_func, 'fp8_gemm', suppress_kineto_output=True)
+            print(f' > Performance ({num_groups=}, m_per_group={m:4}, n={n:4}, k={k:4}): {t * 1e6:4.0f} us | '
+                  f'throughput: {2 * num_groups * m * n * k / t / 1e12:4.0f} TFLOPS, '
+                  f'{(num_groups * (m * k + k * n + m * n * 2)) / 1e9 / t:4.0f} GB/s')
+    print()
+
+def test_m_grouped_gemm_masked_swapab() -> None:
+    print('Testing grouped masked GEMM(swapab):')
+
+    for num_groups, m in ((1, 4), (1, 8), (1, 16), (4, 32), (4, 64),
+                          (2, 4), (2, 8), (2, 16), (2, 32), (2, 64), 
+                          (4, 4), (4, 8), (4, 16), (4, 32), (4, 64)):
+    # for num_groups, m in ((4, 16),):
+        for k, n in ((7168, 4096), (2048, 7168), ):
+            # Test correctness
+            masked_m_candidates = list(filter(lambda candidate: candidate <= m, (4, 8, 12, 16, 20, 24, 28, 32, 64)))
+            # masked_m_candidates = [16]
+            for i in range(10):
+                x_fp8, y_fp8, out, ref_out = construct_masked_grouped(num_groups, m, k, n)
+                masked_m = torch.empty((num_groups, ), device='cuda', dtype=torch.int)
+                for j in range(num_groups):
+                    masked_m[j] = random.choice(masked_m_candidates)
+                expected_m = min(int(masked_m.float().mean()) + 1, m)
+                deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked_swapab(y_fp8, x_fp8, out, masked_m, expected_m)
+                for j in range(num_groups):
+                    # print(out[j, :masked_m[j].item()])
+                    # print(ref_out[j, :masked_m[j].item()])
+                    diff = calc_diff(out[j, :masked_m[j].item()], ref_out[j, :masked_m[j].item()])
+                    assert diff < 0.001, f'{m=}, {k=}, {n=}, {j=}, masked_m={masked_m[j]}, {num_groups=}, {diff:.5f}'
+
+            # Construct new tensors only once to avoid L2 cache acceleration (creating them puts them in L2)
+            x_fp8, y_fp8, out, ref_out = construct_masked_grouped(num_groups, m, k, n)
+            masked_m = torch.ones((num_groups, ), device='cuda', dtype=torch.int) * m
+
+            # noinspection PyShadowingNames
+            def test_func():
+                deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked_swapab(y_fp8, x_fp8, out, masked_m, m)
+
+            # Test performance with fixed shapes
+            t = bench_kineto(test_func, 'fp8_gemm_kernel_swapab', suppress_kineto_output=True)
             print(f' > Performance ({num_groups=}, m_per_group={m:4}, n={n:4}, k={k:4}): {t * 1e6:4.0f} us | '
                   f'throughput: {2 * num_groups * m * n * k / t / 1e12:4.0f} TFLOPS, '
                   f'{(num_groups * (m * k + k * n + m * n * 2)) / 1e9 / t:4.0f} GB/s')
@@ -308,8 +375,10 @@ if __name__ == '__main__':
     print(f' > {deep_gemm.__path__}\n')
 
     test_gemm()
-    test_m_grouped_gemm_contiguous()
+    test_gemm_swapab()
+    # test_m_grouped_gemm_contiguous()
     test_m_grouped_gemm_masked()
+    test_m_grouped_gemm_masked_swapab()
 
-    test_wgrad_gemm()
-    test_k_grouped_wgrad_gemm()
+    # test_wgrad_gemm()
+    # test_k_grouped_wgrad_gemm()

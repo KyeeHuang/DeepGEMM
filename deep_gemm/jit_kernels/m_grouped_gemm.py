@@ -4,7 +4,7 @@ from typing import Tuple
 from ..jit import build
 from .gemm import get_best_configs
 from .runtime import (
-    FP8GemmRuntime, GemmType,
+    FP8GemmRuntime, FP8SwapabGemmRuntime, GemmType,
     make_2d_tma_a_desc, make_2d_tma_b_desc,
     make_2d_tma_d_desc, make_2d_tma_scales_desc)
 from .utils import ceil_div, get_col_major_tma_aligned_tensor, get_num_sms
@@ -159,6 +159,7 @@ def m_grouped_gemm_fp8_fp8_bf16_nt_masked(lhs: Tuple[torch.Tensor, torch.Tensor]
     num_sms = get_num_sms()
     num_sms, block_m, block_n, num_stages, tma_multicast_config, smem_config = get_best_configs(
         expected_m, n, k, num_groups, num_sms, is_grouped_masked=True)
+    # print(f'num_sms: {num_sms}, block_m: {block_m}, block_n: {block_n}, num_stages: {num_stages}, tma_multicast_config: {tma_multicast_config}, smem_config: {smem_config}')
 
     # Extra checks for TMA store
     if num_groups > 1 and m > block_m:
@@ -203,3 +204,108 @@ def m_grouped_gemm_fp8_fp8_bf16_nt_masked(lhs: Tuple[torch.Tensor, torch.Tensor]
     code = FP8GemmRuntime.generate(kwargs)
     runtime = build('m_grouped_gemm_fp8_fp8_bf16_nt', code, FP8GemmRuntime, kwargs)
     runtime(**kwargs)
+
+
+def m_grouped_gemm_fp8_fp8_bf16_nt_masked_swapab(lhs: Tuple[torch.Tensor, torch.Tensor],
+                                          rhs: Tuple[torch.Tensor, torch.Tensor],
+                                          out: torch.Tensor, masked_n: torch.Tensor, expected_n: int) -> None:
+    """
+    Perform a grouped GEMM (masked format) with FP8 inputs and BF16 output, with 1x128 LHS scaling and 128x128 RHS scaling.
+
+    Requirements:
+        LHS, RHS, RHS scaling factors, and output tensors must be in contiguous format.
+        RHS and RHS scaling factors are required to be transposed.
+        The LHS scaling tensor requires a TMA-aligned transposed format, if your input does not match the requirement,
+            this function will do a transposing with a set of slow PyTorch operations.
+        Moreover, this alignment requirement is different with the contiguous-format kernel, as we require that each batch
+            should be separately transposed.
+
+    Arguments:
+        lhs: the first element is an FP8 tensor (typed `torch.float8_e4m3fn`) of shape `[num_groups, m_max, k]`,
+             the second element is an FP32 1x128 scaling tensor for LHS of shape `[num_groups, m_max, ⌈k / 128⌉]`.
+        rhs: the first element is an FP8 tensor (typed `torch.float8_e4m3fn`) of shape `[num_groups, n, k]`.
+             The second element is an FP32 128x128 scaling tensor for RHS of shape `[num_groups, ⌈n / 128⌉, ⌈k / 128⌉]`.
+        out: the BF16 output tensor of shape `[num_groups, m_max, n]`, representing the result.
+        masked_m: a tensor of shape `[num_groups]`, `masked_m[i]` records actual rows of the `lhs[i]` matrix to compute
+            in the i-th group.
+        expected_m: a value hint (which is a value on CPU) for the M expectation of each batch,
+            correctly setting this value may lead to better performance.
+    """
+    lhs, lhs_scales = lhs # weight
+    rhs, rhs_scales = rhs # act 
+    num_groups, m, k = lhs.shape 
+    num_groups_, n, k_ = rhs.shape
+    num_groups__, n_, m_ = out.shape 
+    num_groups___ = masked_n.numel()
+
+    # Type and shape checks
+    assert num_groups == num_groups_ == num_groups__ == num_groups___
+    assert m == m_ and n == n_ and k == k_
+    assert expected_n > 0 and m > 0 and n > 0 and k > 0 and num_groups > 0
+    assert lhs_scales.shape == (num_groups, ceil_div(m, 128), ceil_div(k, 128))
+    assert rhs_scales.shape == (num_groups, n, ceil_div(k, 128))
+    assert lhs.dtype == torch.float8_e4m3fn and lhs_scales.dtype == torch.float32
+    assert rhs.dtype == torch.float8_e4m3fn and rhs_scales.dtype == torch.float32
+    assert out.dtype == torch.bfloat16
+    assert masked_n.dtype == torch.int32
+    assert lhs.is_contiguous() and rhs.is_contiguous()
+    assert out.is_contiguous() and masked_n.is_contiguous()
+
+    # RHS scales must be transposed for TMA load, but not for LHS scales
+    rhs_scales = get_col_major_tma_aligned_tensor(rhs_scales)
+    assert lhs_scales.is_contiguous()
+
+    # Auto-tuning with compilation
+    num_sms = get_num_sms()
+    num_sms, block_m, block_n, num_stages, tma_multicast_config, smem_config = get_best_configs(
+        m, expected_n, k, num_groups, num_sms, is_grouped_masked=True, is_swapab=True)
+    smem_config = (smem_config[0], 0, smem_config[2])  # no swizzle for grouped GEMM
+    # print(f'num_sms: {num_sms}, block_m: {block_m}, block_n: {block_n}, num_stages: {num_stages}, tma_multicast_config: {tma_multicast_config}, smem_config: {smem_config}')
+
+    # Extra checks for TMA store
+    # if num_groups > 1 and n > block_n:
+    #     if n % block_n != 0:
+    #         print(f'For masked grouped GEMM Swapab, shape N should be multiple of the block N (current n: {n}, block N: {block_n})')
+        # assert n % block_n == 0, f'For masked grouped GEMM Swapab, shape N should be multiple of the block N (current block N: {block_n})'
+
+    block_k = 128
+    num_tma_threads = 128
+    num_math_threads_per_group = 128
+
+    tensor_map_act = make_2d_tma_a_desc(GemmType.GroupedMasked, rhs, n, k, k, block_n, block_k, num_groups)
+    tensor_map_weight = make_2d_tma_b_desc(GemmType.GroupedMasked, lhs, m, k, k, block_m, block_k, num_groups)
+    tensor_map_d = make_2d_tma_d_desc(GemmType.GroupedMasked, out, n, m, m, block_n, block_m, num_groups, smem_config[1])
+    tensor_map_scales_act = make_2d_tma_scales_desc(GemmType.GroupedMasked, rhs_scales, n, k, block_n, block_k, num_groups)
+
+    kwargs = {
+        # Templated arguments
+        'NUM_TMA_THREADS': num_tma_threads,
+        'NUM_MATH_THREADS_PER_GROUP': num_math_threads_per_group,
+        'M': m, 'N': n, 'K': k,
+        'BLOCK_M': block_m, 'BLOCK_N': block_n, 'BLOCK_K': block_k,
+        'SWIZZLE_D_MODE': smem_config[1],
+        'BLOCK_N_PADDING': smem_config[2],
+        'NUM_GROUPS': num_groups,
+        'NUM_STAGES': num_stages,
+        'NUM_TMA_MULTICAST': tma_multicast_config[0],
+        'IS_TMA_MULTICAST_ON_ACT': tma_multicast_config[1],
+        'GEMM_TYPE': GemmType.GroupedMasked,
+        # Runtime arguments
+        'OUT_PUT': out,
+        'SCALES_A': lhs_scales,
+        'GROUPED_LAYOUT': masked_n,
+        'NUM_SMS': num_sms,
+        'SMEM_SIZE': smem_config[0],
+        'TENSOR_MAP_A': tensor_map_weight,
+        'TENSOR_MAP_B': tensor_map_act,
+        'TENSOR_MAP_SCALES_B': tensor_map_scales_act,
+        'TENSOR_MAP_D': tensor_map_d,
+        'STREAM': torch.cuda.current_stream().cuda_stream,
+        'DEVICE_INDEX': out.device.index
+    }
+
+    # Generate, build and run the kernel
+    code = FP8SwapabGemmRuntime.generate(kwargs)
+    runtime = build('m_grouped_gemm_fp8_fp8_bf16_nt_swapab', code, FP8SwapabGemmRuntime, kwargs)
+    runtime(**kwargs)
+

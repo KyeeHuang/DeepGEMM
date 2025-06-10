@@ -5,7 +5,7 @@ from typing import Tuple
 
 from ..jit import build
 from .runtime import (
-    FP8GemmRuntime, GemmType,
+    FP8GemmRuntime, FP8SwapabGemmRuntime, GemmType,
     make_2d_tma_a_desc, make_2d_tma_b_desc,
     make_2d_tma_d_desc, make_2d_tma_scales_desc)
 from .utils import get_num_sms, ceil_div, get_col_major_tma_aligned_tensor, get_m_alignment_for_contiguous_layout
@@ -34,34 +34,55 @@ def get_block_n_padding_for_smem_d(block_n: int) -> int:
 
 
 def get_smem_config(num_stages: int, k: int, block_m: int, block_n: int, block_k: int = 128,        
-                    is_fp32_out: bool = False, is_wgrad: bool = False) -> Tuple[int, int, int]:
+                    is_fp32_out: bool = False, is_wgrad: bool = False, is_swapab: bool = False) -> Tuple[int, int, int]:
     assert block_k == 128
 
-    # Try swizzle first, as it does not waste shared memory
-    swizzle_mode = get_swizzle_mode(block_n)
-    block_n_padding = get_block_n_padding_for_smem_d(
-        block_n) if swizzle_mode == 0 else 0
+    if not is_swapab:
+        # Try swizzle first, as it does not waste shared memory
+        swizzle_mode = get_swizzle_mode(block_n)
+        block_n_padding = get_block_n_padding_for_smem_d(
+            block_n) if swizzle_mode == 0 else 0
 
-    # NOTES: `scales_b` in a total manner or per-stage manner
-    smem_d = block_m * (block_n + block_n_padding) * (4 if is_fp32_out else 2)
-    smem_a_per_stage = block_m * block_k
-    smem_scales_a_per_stage = block_m * 4
-    smem_b_per_stage = block_n * block_k
-    smem_scales_b_per_stage = ceil_div(block_n * 4, block_k) * block_k if is_wgrad else 0
-    smem_scales_b = ceil_div(k, block_k) * 4 if not is_wgrad else 0
-    smem_barrier = num_stages * 8 * 2
+        # NOTES: `scales_b` in a total manner or per-stage manner
+        smem_d = block_m * (block_n + block_n_padding) * (4 if is_fp32_out else 2)
+        smem_a_per_stage = block_m * block_k
+        smem_scales_a_per_stage = block_m * 4
+        smem_b_per_stage = block_n * block_k
+        smem_scales_b_per_stage = ceil_div(block_n * 4, block_k) * block_k if is_wgrad else 0
+        smem_scales_b = ceil_div(k, block_k) * 4 if not is_wgrad else 0
+        smem_barrier = num_stages * 8 * 2
 
-    smem_size = 0
-    smem_size += smem_d
-    smem_size += num_stages * smem_a_per_stage
-    smem_size += num_stages * smem_scales_a_per_stage
-    smem_size += num_stages * smem_b_per_stage
-    smem_size += num_stages * smem_scales_b_per_stage
-    smem_size += ceil_div(smem_scales_b * (1 if block_k % block_n == 0 else 2), 8) * 8
-    smem_size += smem_barrier
+        smem_size = 0
+        smem_size += smem_d
+        smem_size += num_stages * smem_a_per_stage
+        smem_size += num_stages * smem_scales_a_per_stage
+        smem_size += num_stages * smem_b_per_stage
+        smem_size += num_stages * smem_scales_b_per_stage
+        smem_size += ceil_div(smem_scales_b * (1 if block_k % block_n == 0 else 2), 8) * 8
+        smem_size += smem_barrier
 
-    # Swizzle and padding are not compatible
-    assert int(swizzle_mode > 0) + int(block_n_padding > 0) <= 1
+        # Swizzle and padding are not compatible
+        assert int(swizzle_mode > 0) + int(block_n_padding > 0) <= 1
+    else:
+        smem_d = block_n * block_m * 2
+        smem_a_per_stage = block_m * block_k # weight
+        smem_scales_a_per_stage = ceil_div(block_m, 128) * ceil_div(k, block_k) * 4 # weight scales
+        smem_b_per_stage = block_n * block_k # act
+        smem_scales_b = ceil_div(block_n * 4, 128) * 128 # act scales,tma 128B对齐
+        smem_barrier = num_stages * 8 * 2
+
+        smem_size = 0
+        smem_size += smem_d
+        smem_size += num_stages * smem_a_per_stage
+        smem_size += num_stages * smem_scales_b
+        smem_size += num_stages * smem_b_per_stage
+        smem_size += ceil_div(smem_scales_a_per_stage, 8) * 8
+        
+        smem_size += smem_barrier
+
+        # TMA swizzle 128B  bm=64,128,256
+        swizzle_mode = get_swizzle_mode(block_m)
+        block_n_padding = 0
 
     return smem_size, swizzle_mode, block_n_padding
 
@@ -69,12 +90,22 @@ def get_smem_config(num_stages: int, k: int, block_m: int, block_n: int, block_k
 @lru_cache(maxsize=None)
 def get_best_configs(m: int, n: int, k: int, num_groups: int, num_sms: int,
                      is_grouped_contiguous: bool = False, is_grouped_masked: bool = False,
-                     is_fp32_out: bool = False, is_wgrad: bool = False) -> \
+                     is_fp32_out: bool = False, is_wgrad: bool = False, is_swapab: bool = False) -> \
         Tuple[int, int, int, int, Tuple[int, bool], Tuple[int, int, int]]:
+
+    if is_swapab:
+        # When is_swapab is True, it implies either normal GEMM or grouped_masked GEMM.
+        assert not is_grouped_contiguous, "is_swapab is not compatible with is_grouped_contiguous"
+        assert not is_fp32_out, "is_swapab is not compatible with is_fp32_out"
+        assert not is_wgrad, "is_swapab is not compatible with is_wgrad"
+    
     if not is_grouped_contiguous:
         block_ms = (64, 128, ) + ((256, ) if not is_fp32_out else ())
     else:
         block_ms = (get_m_alignment_for_contiguous_layout(), )
+    
+    if is_swapab:
+        block_ms = (64, 128,) 
     block_ns = tuple(range(16, 129, 8)) + ((136, 152, ) if is_wgrad else (144, 160, ))
     
     # Avoid bank conflicts for FP32 output
@@ -119,7 +150,7 @@ def get_best_configs(m: int, n: int, k: int, num_groups: int, num_sms: int,
         # Unrolling both stages and `num_former_iters` will cause large code size
         stage_candidates = tuple(filter(lambda s: s <= max(k // 128, 1), (4, 3, 2, 1)))
     for num_stages in stage_candidates:
-        best_smem_config = get_smem_config(num_stages, k, best_block_m, best_block_n, is_fp32_out=is_fp32_out, is_wgrad=is_wgrad)
+        best_smem_config = get_smem_config(num_stages, k, best_block_m, best_block_n, is_fp32_out=is_fp32_out, is_wgrad=is_wgrad, is_swapab=is_swapab)
         if best_smem_config[0] <= sm90_capacity:
             best_num_stages = num_stages
             break
@@ -139,6 +170,19 @@ def get_best_configs(m: int, n: int, k: int, num_groups: int, num_sms: int,
         if m >= 512 and is_multicast_legal[i]:
             best_tma_multicast_config = (2, i == 'A')
             break
+    
+    if is_swapab:
+        # Decide the number of TMA multicasts and whether broadcast on A
+        best_tma_multicast_config = (1, True)
+        # For grouped masked TMA multicast, only B(act) is supported, and the number of blocks in the M direction must be even
+        is_multicast_legal = {
+        'Act': is_tma_multicast_legal(m, best_block_m, 2, num_sms, is_grouped_masked), # act
+        'W': is_tma_multicast_legal(n, best_block_n, 2, num_sms) and not is_grouped_masked, # weight
+        }
+        for i in ('W', 'Act') if best_block_m > best_block_n else ('Act', 'W'):
+            if n >= 512 and is_multicast_legal[i]:
+                best_tma_multicast_config = (2, i == 'Act')
+                break
 
     # Recompute the minimal number of SMs required
     # NOTES: less L2 cache usage and less GPU frequency drop
@@ -239,4 +283,105 @@ def gemm_fp8_fp8_bf16_nt(lhs: Tuple[torch.Tensor, torch.Tensor],
     # Generate, build and run the kernel
     code = FP8GemmRuntime.generate(kwargs)
     runtime = build('gemm_fp8_fp8_bf16_nt', code, FP8GemmRuntime, kwargs)
+    runtime(**kwargs)
+
+
+def gemm_fp8_fp8_bf16_nt_swapab(lhs: Tuple[torch.Tensor, torch.Tensor],
+                                rhs: Tuple[torch.Tensor, torch.Tensor],
+                                out: torch.Tensor) -> None:
+    """
+    Perform a normal GEMM with FP8 inputs and BF16 output, with swapped A and B matrices.
+    This is a variant of the normal GEMM where the roles of A and B are swapped:
+    - lhs (weight) has shape [m, k] with scaling [ceil(m/128), ceil(k/128)]
+    - rhs (activation) has shape [n, k] with scaling [n, ceil(k/128)]
+    - out has shape [n, m] (note the swapped dimensions)
+
+    Requirements:
+        LHS, RHS, and output tensors must be contiguous in dimension 1, i.e., stride(1) = 1.
+        The stride(0) of LHS and RHS must be a multiple of 16, and the stride(0) of output must be a multiple of 8.
+        RHS scaling factors are required to be transposed.
+        The LHS scaling tensor must be in contiguous format.
+
+    Arguments:
+        lhs: the first element is an FP8 tensor (typed `torch.float8_e4m3fn`) of shape `[m, k]` (weight),
+             the second element is an FP32 scaling tensor for LHS of shape `[ceil(m/128), ceil(k/128)]`.
+        rhs: the first element is an FP8 tensor (typed `torch.float8_e4m3fn`) of shape `[n, k]` (activation),
+             the second element is an FP32 scaling tensor for RHS of shape `[n, ceil(k/128)]`.
+        out: the BF16 output tensor of shape `[n, m]`, representing the result.
+    """
+    lhs, lhs_scales = lhs  # weight
+    rhs, rhs_scales = rhs  # activation
+    m, k = lhs.shape
+    n, k_ = rhs.shape
+    n_, m_ = out.shape
+
+    # Type and shape checks
+    assert m == m_ and n == n_ and k == k_
+    assert n > 0 and k > 0
+    assert lhs_scales.shape == (ceil_div(m, 128), ceil_div(k, 128))
+    assert rhs_scales.shape == (n, ceil_div(k, 128))
+    assert lhs.dtype == torch.float8_e4m3fn and lhs_scales.dtype == torch.float32
+    assert rhs.dtype == torch.float8_e4m3fn and rhs_scales.dtype == torch.float32
+    assert out.dtype == torch.bfloat16
+    assert lhs.stride(1) == 1 and rhs.stride(1) == 1 and out.stride(1) == 1
+
+    # RHS scales must be transposed for TMA loads, but not for LHS scales
+    # NOTES: `get_col_major_tma_aligned_tensor` may launch a kernel if not processed by previous kernels
+    rhs_scales = get_col_major_tma_aligned_tensor(rhs_scales)
+    assert lhs_scales.is_contiguous()
+
+    # Do nothing if `n` is zero
+    if n == 0:
+        return
+
+    # K must be aligned to 128
+    aligned_k = ceil_div(k, 128) * 128
+
+    # Auto-tuning with compilation
+    num_sms = get_num_sms()
+    num_sms, block_m, block_n, num_stages, tma_multicast_config, smem_config = get_best_configs(
+        m, n, k, 1, num_sms, is_swapab=True)
+    # print(f'num_sms: {num_sms}, block_m: {block_m}, block_n: {block_n}, num_stages: {num_stages}, tma_multicast_config: {tma_multicast_config}, smem_config: {smem_config}')
+
+    block_k = 128
+    num_tma_threads = 128
+    num_math_threads_per_group = 128
+
+    # Create tensor maps for swapped matrices
+    # In swapab version: A (weight) is lhs, B (activation) is rhs
+    tensor_map_act = make_2d_tma_a_desc(GemmType.Normal, rhs, n, k, rhs.stride(0), block_n, block_k, 1)
+    tensor_map_weight = make_2d_tma_b_desc(GemmType.Normal, lhs, m, k, lhs.stride(0), block_m, block_k, 1)
+    tensor_map_d = make_2d_tma_d_desc(GemmType.Normal, out, n, m, out.stride(0), block_n, block_m, 1, smem_config[1])
+    tensor_map_scales_act = make_2d_tma_scales_desc(GemmType.Normal, rhs_scales, n, k, block_n, block_k, 1)
+
+    kwargs = {
+        # Templated arguments
+        'NUM_TMA_THREADS': num_tma_threads,
+        'NUM_MATH_THREADS_PER_GROUP': num_math_threads_per_group,
+        'M': m, 'N': n, 'K': aligned_k,
+        'BLOCK_M': block_m, 'BLOCK_N': block_n, 'BLOCK_K': block_k,
+        'SWIZZLE_D_MODE': smem_config[1],
+        'BLOCK_N_PADDING': smem_config[2],
+        'NUM_GROUPS': 1,
+        'NUM_STAGES': num_stages,
+        'NUM_TMA_MULTICAST': tma_multicast_config[0],
+        'IS_TMA_MULTICAST_ON_ACT': tma_multicast_config[1],
+        'GEMM_TYPE': GemmType.Normal,
+        # Runtime arguments
+        'OUT_PUT': out,
+        'SCALES_A': lhs_scales,
+        'GROUPED_LAYOUT': torch.empty(0, dtype=torch.int32, device=out.device),
+        'NUM_SMS': num_sms,
+        'SMEM_SIZE': smem_config[0],
+        'TENSOR_MAP_A': tensor_map_weight,
+        'TENSOR_MAP_B': tensor_map_act,
+        'TENSOR_MAP_SCALES_B': tensor_map_scales_act,
+        'TENSOR_MAP_D': tensor_map_d,
+        'STREAM': torch.cuda.current_stream().cuda_stream,
+        'DEVICE_INDEX': out.device.index
+    }
+
+    # Generate, build and run the kernel
+    code = FP8SwapabGemmRuntime.generate(kwargs)
+    runtime = build('gemm_fp8_fp8_bf16_nt_swapab', code, FP8SwapabGemmRuntime, kwargs)
     runtime(**kwargs)
