@@ -68,6 +68,67 @@ static void fp8_gemm_nt(const std::pair<torch::Tensor, torch::Tensor>& a,
     }
 }
 
+void fp8_gemm_ntt(const std::pair<torch::Tensor, torch::Tensor>& a,
+                 const std::pair<torch::Tensor, torch::Tensor>& b,
+                 const torch::Tensor& d,
+                 const std::optional<torch::Tensor>& c,
+                 std::optional<std::tuple<int, int, int>> recipe,
+                 const std::string& compiled_dims,
+                 const bool& disable_ue8m0_cast) {
+    // printf("fp8_gemm_nt\n");
+    // Shape must be `[M, K] @ [N, K].T`
+    const auto& major_a = get_major_type_ab(a.first);
+    const auto& major_b = get_major_type_ab(b.first);
+    if (fp8_requires_k_major()) {
+        DG_HOST_ASSERT(major_a == cute::UMMA::Major::K);
+        DG_HOST_ASSERT(major_b == cute::UMMA::Major::K);
+    }
+
+    // C/D must be N-major
+    check_major_type_cd(d);
+
+    // Type and shape checks
+    const auto& [m , k ] = get_shape<2>(a.first);
+    const auto& [n , k_] = get_shape<2>(b.first);
+    const auto& [m_, n_] = get_shape<2>(d);
+    DG_HOST_ASSERT(m == m_ and n == n_ and k == k_);
+    DG_HOST_ASSERT(n > 0 and k > 0);
+    DG_HOST_ASSERT(a.first.scalar_type() == torch::kFloat8_e4m3fn);
+    DG_HOST_ASSERT(b.first.scalar_type() == torch::kFloat8_e4m3fn);
+    DG_HOST_ASSERT(d.scalar_type() == torch::kBFloat16);
+
+    // Check C as well
+    if (c.has_value()) {
+        check_major_type_cd(c.value());
+        DG_HOST_ASSERT(d.scalar_type() == torch::kFloat);
+        DG_HOST_ASSERT(c.value().scalar_type() == torch::kFloat);
+    }
+
+    // Do nothing if the problem is empty
+    if (m == 0)
+        return;
+
+    // Transform SFA and SFB into compute-required layout
+    if (not recipe.has_value())
+        recipe = get_default_recipe(a.second.scalar_type(), b.second.scalar_type());
+    const auto& sfa = transform_sf_into_required_layout(a.second, m, k, std::nullopt, recipe.value(),  true, disable_ue8m0_cast);
+    const auto& sfb = transform_sf_into_required_layout(b.second, n, k, std::nullopt, recipe.value(), false, disable_ue8m0_cast);
+
+    // Dispatch into different implements
+    const auto& arch_major = device_runtime->get_arch_major();
+    DG_HOST_ASSERT(arch_major == 10 and sfa.scalar_type() == torch::kInt);
+    if (arch_major == 9 and sfa.scalar_type() == torch::kFloat) {
+        sm90_fp8_gemm_1d2d(a.first, sfa, b.first, sfb, c, d, m, n, k, major_a, major_b, compiled_dims);
+    } else if (arch_major == 10 and sfa.scalar_type() == torch::kInt) {
+        sm100_fp8_gemm_1d1d(b.first, sfb, a.first, sfa, c, d, n, m, k, major_b, major_a, compiled_dims, true);
+    } else if (arch_major == 10 and sfa.scalar_type() == torch::kFloat) {
+        sm100_fp8_gemm_1d2d(a.first, sfa, b.first, sfb, c, d, m, n, k, major_a, major_b, compiled_dims);
+    } else {
+        DG_HOST_UNREACHABLE("Unknown kernel or scaling factor types");
+    }
+}
+
+
 static void fp8_gemm_nn(const std::pair<torch::Tensor, torch::Tensor>& a,
                         const std::pair<torch::Tensor, torch::Tensor>& b,
                         const torch::Tensor& d,
@@ -406,6 +467,11 @@ static void m_grouped_bf16_gemm_nt_masked(const torch::Tensor& a, const torch::T
 static void register_apis(pybind11::module_& m) {
     // FP8 GEMMs
      m.def("fp8_gemm_nt", &fp8_gemm_nt,
+          py::arg("a"), py::arg("b"), py::arg("d"),
+          py::arg("c") = std::nullopt, py::arg("recipe") = std::nullopt,
+          py::arg("compiled_dims") = "nk",
+          py::arg("disable_ue8m0_cast") = false);
+    m.def("fp8_gemm_ntt", &fp8_gemm_ntt,
           py::arg("a"), py::arg("b"), py::arg("d"),
           py::arg("c") = std::nullopt, py::arg("recipe") = std::nullopt,
           py::arg("compiled_dims") = "nk",

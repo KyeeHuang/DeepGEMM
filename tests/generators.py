@@ -68,12 +68,20 @@ def get_major_ab(freeze_a: bool) -> tuple:
            (MajorTypeAB.MNMajor, MajorTypeAB.KMajor), (MajorTypeAB.MNMajor, MajorTypeAB.MNMajor)
 
 
-def enumerate_normal(use_bf16: bool = False) -> Generator:
-    for kernel_type in get_kernel_types(use_bf16):
-        for m in (128, 4096):
-            for n, k in [(2112, 7168), (24576, 1536), (32768, 512), (7168, 16384), (4096, 7168), (7168, 2048)]:
-                for major_a, major_b in get_major_ab(False):
-                    for out_dtype in get_out_dtype():
+def enumerate_normal() -> Generator:
+    # for kernel_type in get_kernel_types():
+    for kernel_type in (KernelType.Kernel1D1D, ):
+        # for m in (1, 2, 4, 8, 16, 24, 32, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128):
+        for m in (1, 2, 4, 8,):
+            # for n, k in [(2112, 7168), (24576, 1536), (32768, 512), (7168, 16384), (4096, 7168), (7168, 2048)]:
+            # for n, k in [(2112, 7168), (1024,7168), (1000, 7168)]:
+            for n, k in [(1024, 7168),]:
+            # for k, n in [(7168, 2112), (1536, 24576), (512, 32768), (16384, 7168), (7168, 4096),(2048, 7168), (1024, 1024)]:
+                # for major_a, major_b in get_major_ab(False):
+                # for major_a, major_b in [(MajorTypeAB.KMajor, MajorTypeAB.KMajor),(MajorTypeAB.MNMajor, MajorTypeAB.MNMajor)]:
+                for major_a, major_b in [(MajorTypeAB.KMajor, MajorTypeAB.KMajor),]:
+                    # for out_dtype in get_out_dtype():
+                    for out_dtype in (torch.bfloat16,):
                         for accumulate in (False, ) if out_dtype == torch.bfloat16 or kernel_type.is_1d2d() else (False, True):
                             yield kernel_type, m, n, k, major_a, major_b, accumulate, out_dtype
 

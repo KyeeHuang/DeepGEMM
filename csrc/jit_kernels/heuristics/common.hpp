@@ -71,6 +71,8 @@ struct GemmConfig {
     MulticastConfig multicast_config;
     SharedMemoryConfig smem_config;
     ThreadConfig thread_config;
+
+    bool swap_ab=false;
 };
 
 static bool is_multicast_legal(const int& shape_dim, const int& block_dim,
@@ -96,7 +98,7 @@ static SharedMemoryConfig get_smem_config(const KernelType& kernel_type,
                                           const int& block_m, const int& block_n, const int& block_k,
                                           const cute::UMMA::Major& major_a, const cute::UMMA::Major& major_b,
                                           const at::ScalarType& ab_dtype, const at::ScalarType& cd_dtype,
-                                          const int& num_stages, const MulticastConfig& multicast_config) {
+                                          const int& num_stages, const MulticastConfig& multicast_config, const bool& swap_ab=false) {
     const int& ab_elem_size = static_cast<int>(c10::elementSize(ab_dtype));
     const int& cd_elem_size = static_cast<int>(c10::elementSize(cd_dtype));
 
@@ -104,7 +106,8 @@ static SharedMemoryConfig get_smem_config(const KernelType& kernel_type,
     const int& load_block_n = ArchSpec::get_ab_load_block_n(multicast_config, block_n);
     const int& swizzle_a_mode = get_swizzle_mode(major_a == cute::UMMA::Major::K ? block_k : load_block_m, ab_elem_size);
     const int& swizzle_b_mode = get_swizzle_mode(major_b == cute::UMMA::Major::K ? block_k : load_block_n, ab_elem_size);
-    const int& swizzle_cd_mode = get_swizzle_mode(block_n, cd_elem_size);
+    // const int& swizzle_cd_mode = get_swizzle_mode(block_n, cd_elem_size);
+    const int& swizzle_cd_mode = swap_ab ? 16 : get_swizzle_mode(block_n, cd_elem_size);
 
     // Different archs have different epilogue pipelines
     const int& smem_cd = ArchSpec::get_smem_cd_size(kernel_type, block_m, block_n, swizzle_cd_mode, cd_dtype);
@@ -146,7 +149,7 @@ static GemmConfig get_best_config(const GemmType& gemm_type, const KernelType& k
                                   const int& m, const int& n, const int& k, const int& num_groups,
                                   const cute::UMMA::Major& major_a, const cute::UMMA::Major& major_b,
                                   const at::ScalarType& ab_dtype, const at::ScalarType& cd_dtype,
-                                  const bool& with_accumulation, const int& num_sms) {
+                                  const bool& with_accumulation, const int& num_sms, const bool& swap_ab=false) {
     DG_HOST_ASSERT(ab_dtype == torch::kFloat8_e4m3fn or ab_dtype == torch::kBFloat16);
     DG_HOST_ASSERT(cd_dtype == torch::kBFloat16 or cd_dtype == torch::kFloat);
 
@@ -241,7 +244,7 @@ static GemmConfig get_best_config(const GemmType& gemm_type, const KernelType& k
                                                      best_block_m, best_block_n, block_k,
                                                      major_a, major_b,
                                                      ab_dtype, cd_dtype,
-                                                     num_stages, best_multicast_config);
+                                                     num_stages, best_multicast_config, swap_ab);
         if (best_smem_config.smem_size <= smem_capacity) {
             best_num_stages = num_stages;
             break;
@@ -276,7 +279,8 @@ static GemmConfig get_best_config(const GemmType& gemm_type, const KernelType& k
         .multicast_config = best_multicast_config,
         // ReSharper disable once CppLocalVariableMightNotBeInitialized
         .smem_config = best_smem_config,
-        .thread_config = ArchSpec::get_thread_config(kernel_type, best_block_m, best_block_n)
+        .thread_config = ArchSpec::get_thread_config(kernel_type, best_block_m, best_block_n),
+        .swap_ab = swap_ab
     };
 
     // Only SM100 BF16 kernels support tensor core control
@@ -286,21 +290,21 @@ static GemmConfig get_best_config(const GemmType& gemm_type, const KernelType& k
     // Print configs for the first time
     if (get_env<int>("DG_JIT_DEBUG") or get_env<int>("DG_PRINT_CONFIGS")) {
         auto key = std::make_tuple(gemm_type, kernel_type, m, n, k, num_groups, major_a, major_b,
-                                   ab_dtype, cd_dtype, with_accumulation, num_sms);
+                                   ab_dtype, cd_dtype, with_accumulation, num_sms, swap_ab);
         static std::set<decltype(key)> printed;
         if (printed.count(key) == 0) {
             printf("GEMM type: %d, kernel type: %d, M: %d, N: %d, K: %d, groups: %d, "
                    "A major: %d, B major: %d, AB dtype: %s, CD dtype: %s, accumulation: %d, "
                    "SM limit: %d -> block M: %d, block N: %d, block K: %d, stages: %d, last stages: %d, "
                    "SMs: %d, multicast: %d, multicast on A: %d, shared memory: %d bytes, swizzle A: %d, "
-                   "swizzle B: %d, swizzle CD: %d, SMs: %d, threads: %d, TC util: %d%%\n",
+                   "swizzle B: %d, swizzle CD: %d, SMs: %d, threads: %d, TC util: %d%%, swap_ab: %d\n",
                    static_cast<int>(gemm_type), static_cast<int>(kernel_type), m, n, k, num_groups,
                    static_cast<int>(major_a), static_cast<int>(major_b), c10::toString(ab_dtype), c10::toString(cd_dtype),
                    static_cast<int>(with_accumulation), num_sms, best_block_m, best_block_n, block_k,
                    best_num_stages, config.num_last_stages, num_min_sms, best_multicast_config.num_multicast,
                    static_cast<int>(best_multicast_config.is_multicast_on_a),
                    best_smem_config.smem_size, best_smem_config.swizzle_a_mode, best_smem_config.swizzle_b_mode,
-                   best_smem_config.swizzle_cd_mode, config.num_sms, config.thread_config.num_threads, config.tc_util);
+                   best_smem_config.swizzle_cd_mode, config.num_sms, config.thread_config.num_threads, config.tc_util, config.swap_ab);
             printed.insert(key);
         }
     }

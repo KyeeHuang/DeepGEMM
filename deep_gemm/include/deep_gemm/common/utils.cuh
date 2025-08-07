@@ -7,6 +7,7 @@
 #include <cute/container/tuple.hpp>
 
 #include "cute_tie.cuh"
+#include <cutlass/bfloat16.h>
 
 #ifdef __CLION_IDE__
 
@@ -161,5 +162,20 @@ struct Vectorized {
 
     using vec_t = decltype(zeros());
 };
+
+__device__ __forceinline__ cutlass::bfloat16_t uint32_to_bf16(uint32_t& value) {
+    return cutlass::bfloat16_t(__float2bfloat16_rn(*reinterpret_cast<float*>(&value)));
+}
+
+__device__ __forceinline__ void st_shared_bf16_column(cutlass::bfloat16_t* smem_base,
+                                                      uint32_t values[8],
+                                                      uint32_t smem_stride,
+                                                      uint32_t thread_col) {
+    #pragma unroll
+    for(int row = 0; row < 8; row++) {
+        cutlass::bfloat16_t bf16_val = uint32_to_bf16(values[row]);
+        smem_base[row * smem_stride + thread_col] = bf16_val;
+    }
+}
 
 } // namespace `deep_gemm`

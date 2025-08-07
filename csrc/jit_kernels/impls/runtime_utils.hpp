@@ -144,6 +144,8 @@ static CUtensorMap make_tma_cd_desc(const torch::Tensor& t,
 
     // Swizzling requires the inner box dim to be less or equal than `kSwizzleCDMode`
     // bytes, so `BLOCK_N * sizeof(T) / kSwizzleCDMode` TMA stores are required
+    // printf("make_tma_cd_desc: shape_m: %d, shape_n: %d, block_m: %d, block_n: %d, outer_stride: %d, num_groups: %d, swizzle_mode: %d\n",
+    //     shape_m, shape_n, block_m, block_n, outer_stride, num_groups, swizzle_mode);
     return make_tma_2d_desc(t,
                             shape_n, shape_m * num_groups,
                             block_n, block_m,
