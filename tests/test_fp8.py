@@ -11,7 +11,7 @@ from deep_gemm.testing import (
 
 from generators import (
     KernelType, get_ue8m0_usage,
-    enumerate_normal, enumerate_m_grouped_contiguous, enumerate_m_grouped_masked, enumerate_k_grouped_contiguous,
+    enumerate_normal, enumerate_normal_swapab,enumerate_m_grouped_contiguous, enumerate_m_grouped_masked, enumerate_k_grouped_contiguous,
     generate_normal, generate_m_grouped_contiguous, generate_m_grouped_masked, generate_k_grouped_contiguous
 )
 
@@ -39,11 +39,6 @@ def test_gemm() -> None:
             assert diff < 0.001, (f'{m=}, {n=}, {k=}, {kernel_opt}, {major_opt=}, {accumulate=}, {out_dtype=}, '
                                   f'{diff:.5f}, alias={test_alias}')
         a, b, c, d, ref_d = generate_normal(m, n, k, major_a, major_b, accumulate, out_dtype, use_ue8m0=use_ue8m0)
-        # a: (m, k)  major_a: 可能是KMajor，也可能是MNMajor
-        # b: (n, k)
-        # c: (m, n)
-        # d: (m, n)
-        # ref_d: (m, n)
 
         # Test launch overhead
         launch_start_t = time.time_ns()
@@ -64,7 +59,7 @@ def test_gemm() -> None:
 
 def test_gemm_swap_ab() -> None:
     print('Testing GEMM with swap_ab:')
-    for kernel_type, m, n, k, major_a, major_b, accumulate, out_dtype in enumerate_normal():
+    for kernel_type, m, n, k, major_a, major_b, accumulate, out_dtype in enumerate_normal_swapab():
         major_opt  = 'N' if major_a.is_k_major() else 'T'
         major_opt += 'T' if major_b.is_k_major() else 'N'
         out_opt    = 'FP32' if out_dtype == torch.float else 'BF16'
@@ -75,12 +70,12 @@ def test_gemm_swap_ab() -> None:
 
         for test_alias in (False, True):
             a, b, c, d, ref_d = generate_normal(m, n, k, major_a, major_b, accumulate, out_dtype, use_ue8m0=use_ue8m0)
-            func_name = f'fp8_gemm_{major_opt.lower() if test_alias else "nt"}'
+            func_name = f'fp8_gemm_{major_opt.lower() if test_alias else "nt"}t'
             if test_alias:
                 a = a if major_a.is_k_major() else (a[0].T, a[1].T)
                 b = b if major_b.is_k_major() else (b[0].T, b[1].T)
                 assert a[0].is_contiguous() and b[0].is_contiguous()
-            getattr(deep_gemm, func_name)(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast, swap_ab=True)
+            getattr(deep_gemm, func_name)(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast)
             diff = calc_diff(d, ref_d)
             assert diff < 0.001, (f'{m=}, {n=}, {k=}, {kernel_opt}, {major_opt=}, {accumulate=}, {out_dtype=}, '
                                   f'{diff:.5f}, alias={test_alias}')
@@ -93,13 +88,13 @@ def test_gemm_swap_ab() -> None:
 
         # Test launch overhead
         launch_start_t = time.time_ns()
-        deep_gemm.fp8_gemm_nt(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast, swap_ab=True)
+        deep_gemm.fp8_gemm_ntt(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast)
         launch_end_t = time.time_ns()
         torch.cuda.synchronize()
 
         # noinspection PyShadowingNames
         def test_func():
-            deep_gemm.fp8_gemm_nt(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast, swap_ab=True)
+            deep_gemm.fp8_gemm_ntt(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast)
 
         t = bench_kineto(test_func, 'fp8_gemm', suppress_kineto_output=True)
         print(f' > Perf (m={m:5}, n={n:5}, k={k:5}, {kernel_opt}, layout={major_opt}, {out_opt}, {acc_opt}):'

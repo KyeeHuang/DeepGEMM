@@ -107,7 +107,8 @@ static void sm100_fp8_gemm_1d1d(const torch::Tensor& a, const torch::Tensor& sfa
     const int tma_n = swap_ab ? m : n; 
     const int tma_block_m = swap_ab ? config.smem_config.swizzle_cd_mode / d.element_size() : SM100ArchSpec::get_cd_store_block_m(config.block_m);
     const int tma_block_n = swap_ab ? SM100ArchSpec::get_cd_store_block_m(config.block_m) : SM100ArchSpec::get_cd_store_block_n(config.block_n);
-    const int tma_swizzle_cd_mode = swap_ab ? 0 : config.smem_config.swizzle_cd_mode;
+    // swapab bm=64/128/256, actual swizzle_cd_mode=128
+    const int tma_swizzle_cd_mode = swap_ab ? 128 : config.smem_config.swizzle_cd_mode;
 
     const auto& tensor_map_d = make_tma_cd_desc(d, tma_m, tma_n,
                                                 tma_block_m, tma_block_n,

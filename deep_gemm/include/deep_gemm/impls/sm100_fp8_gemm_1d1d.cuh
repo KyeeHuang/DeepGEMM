@@ -7,6 +7,7 @@
 #include <deep_gemm/common/scheduler.cuh>
 #include <deep_gemm/common/utils.cuh>
 #include <deep_gemm/common/sm100_utils.cuh>
+#include <deep_gemm/common/sm90_utils.cuh>
 
 namespace deep_gemm {
 
@@ -513,117 +514,109 @@ sm100_fp8_gemm_1d1d_impl(int* grouped_layout,
                         for (uint32_t i = 0; i < STORE_BLOCK_N / kNumElemsPerBankGroup; ++ i) {
                             if constexpr (!kSwapAB) 
                             {
-                                if constexpr (kSwizzleCDMode == 16) 
-                                {
-                                    // Source and destination memory address
-                                    uint32_t tmem_addr = accum_stage_idx * kNumMWaves * BLOCK_N +               // Accumulator offset
-                                                        w * BLOCK_N +                                          // Wave offset
-                                                        s * STORE_BLOCK_N + i * kNumElemsPerBankGroup;         // In-block offset
-                                    auto smem_ptr = reinterpret_cast<uint8_t*>(smem_cd[tma_stage_idx]) +        // Base pointer
-                                                    epilogue_warp_idx * 32 * kSwizzleCDMode +                   // Warp offset
-                                                    lane_idx * 16;  // In-atom offset
-                                    // Load from tensor memory, store into shared memory
-                                    uint32_t values[kNumElemsPerBankGroup];
-                                    if constexpr (std::is_same_v<cd_dtype_t, float>) {
-                                        // For FP32 output, read and store
-                                        DG_STATIC_ASSERT(kNumElemsPerBankGroup == 4, "Invalid type");
-                                        cute::SM100_TMEM_LOAD_32dp32b4x::copy(tmem_addr,
-                                            values[0], values[1], values[2], values[3]);
-                                        cutlass::arch::fence_view_async_tmem_load();
-                                        st_shared(smem_ptr, values[0], values[1], values[2], values[3]);
-                                    } else {
-                                        // For BF16 output, read, cast and store
-                                        DG_STATIC_ASSERT(kNumElemsPerBankGroup == 8 and std::is_same_v<cd_dtype_t, cutlass::bfloat16_t>, "Invalid type");
-                                        cute::SM100_TMEM_LOAD_32dp32b8x::copy(tmem_addr,
-                                            values[0], values[1], values[2], values[3],
-                                            values[4], values[5], values[6], values[7]);
-                                        cutlass::arch::fence_view_async_tmem_load();
-                                        st_shared(smem_ptr,
-                                                cast_into_bf16_and_pack(values[0], values[1]),
-                                                cast_into_bf16_and_pack(values[2], values[3]),
-                                                cast_into_bf16_and_pack(values[4], values[5]),
-                                                cast_into_bf16_and_pack(values[6], values[7]));
-                                    }
-                                } // swizzle_cd_mode == 16
-                                else 
-                                {
-                                    // Calculate the index of the bank group to be written in the atom
-                                    auto bank_group_index = i + lane_idx * (kSwizzleCDMode / kNumBankGroupBytes);
+                                // Calculate the index of the bank group to be written in the atom
+                                auto bank_group_index = i + lane_idx * (kSwizzleCDMode / kNumBankGroupBytes);
 
-                                    // Reshape the atom in another view and swizzle
-                                    //  - original: `(LAYOUT_AD_M, kSwizzleCDMode / kNumBankGroupBytes)`
-                                    //  - new: `(LAYOUT_AD_M * kSwizzleCDMode / kNumBankGroupBytes / 8, 8)`
-                                    // NOTES: "8" is the number of bank groups, "16" is the swizzling pattern
-                                    constexpr bool kHasShortcut = (kSwizzleCDMode / kNumBankGroupBytes) == 8;
-                                    auto row = kHasShortcut ? (i / 8 + lane_idx) : (bank_group_index / 8);
-                                    auto col = kHasShortcut ? (i) : (bank_group_index % 8);
-                                    col ^= row % (kSwizzleCDMode / 16);
+                                // Reshape the atom in another view and swizzle
+                                //  - original: `(LAYOUT_AD_M, kSwizzleCDMode / kNumBankGroupBytes)`
+                                //  - new: `(LAYOUT_AD_M * kSwizzleCDMode / kNumBankGroupBytes / 8, 8)`
+                                // NOTES: "8" is the number of bank groups, "16" is the swizzling pattern
+                                constexpr bool kHasShortcut = (kSwizzleCDMode / kNumBankGroupBytes) == 8;
+                                auto row = kHasShortcut ? (i / 8 + lane_idx) : (bank_group_index / 8);
+                                auto col = kHasShortcut ? (i) : (bank_group_index % 8);
+                                col ^= row % (kSwizzleCDMode / 16);
 
-                                    // Source and destination memory address
-                                    uint32_t tmem_addr = accum_stage_idx * kNumMWaves * BLOCK_N +               // Accumulator offset
-                                                        w * BLOCK_N +                                          // Wave offset
-                                                        s * STORE_BLOCK_N + i * kNumElemsPerBankGroup;         // In-block offset
-                                    auto smem_ptr = reinterpret_cast<uint8_t*>(smem_cd[tma_stage_idx]) +        // Base pointer
-                                                    epilogue_warp_idx * 32 * kSwizzleCDMode +                   // Warp offset
-                                                    row * (kNumBankGroupBytes * 8) + col * kNumBankGroupBytes;  // In-atom offset
-                                    
-                                    // Load from tensor memory, store into shared memory
-                                    uint32_t values[kNumElemsPerBankGroup];
-                                    if constexpr (std::is_same_v<cd_dtype_t, float>) {
-                                        // For FP32 output, read and store
-                                        DG_STATIC_ASSERT(kNumElemsPerBankGroup == 4, "Invalid type");
-                                        cute::SM100_TMEM_LOAD_32dp32b4x::copy(tmem_addr,
-                                            values[0], values[1], values[2], values[3]);
-                                        cutlass::arch::fence_view_async_tmem_load();
-                                        st_shared(smem_ptr, values[0], values[1], values[2], values[3]);
-                                    } else {
-                                        // For BF16 output, read, cast and store
-                                        DG_STATIC_ASSERT(kNumElemsPerBankGroup == 8 and std::is_same_v<cd_dtype_t, cutlass::bfloat16_t>, "Invalid type");
-                                        cute::SM100_TMEM_LOAD_32dp32b8x::copy(tmem_addr,
-                                            values[0], values[1], values[2], values[3],
-                                            values[4], values[5], values[6], values[7]);
-                                        cutlass::arch::fence_view_async_tmem_load();
-                                        st_shared(smem_ptr,
-                                                cast_into_bf16_and_pack(values[0], values[1]),
-                                                cast_into_bf16_and_pack(values[2], values[3]),
-                                                cast_into_bf16_and_pack(values[4], values[5]),
-                                                cast_into_bf16_and_pack(values[6], values[7]));
-                                    }
-                                }  // swizzle_cd_mode != 16
+                                // Source and destination memory address
+                                uint32_t tmem_addr = accum_stage_idx * kNumMWaves * BLOCK_N +               // Accumulator offset
+                                                    w * BLOCK_N +                                          // Wave offset
+                                                    s * STORE_BLOCK_N + i * kNumElemsPerBankGroup;         // In-block offset
+                                auto smem_ptr = reinterpret_cast<uint8_t*>(smem_cd[tma_stage_idx]) +        // Base pointer
+                                                epilogue_warp_idx * 32 * kSwizzleCDMode +                   // Warp offset
+                                                row * (kNumBankGroupBytes * 8) + col * kNumBankGroupBytes;  // In-atom offset
+                                
+                                // Load from tensor memory, store into shared memory
+                                uint32_t values[kNumElemsPerBankGroup];
+                                if constexpr (std::is_same_v<cd_dtype_t, float>) {
+                                    // For FP32 output, read and store
+                                    DG_STATIC_ASSERT(kNumElemsPerBankGroup == 4, "Invalid type");
+                                    cute::SM100_TMEM_LOAD_32dp32b4x::copy(tmem_addr,
+                                        values[0], values[1], values[2], values[3]);
+                                    cutlass::arch::fence_view_async_tmem_load();
+                                    st_shared(smem_ptr, values[0], values[1], values[2], values[3]);
+                                } else {
+                                    // For BF16 output, read, cast and store
+                                    DG_STATIC_ASSERT(kNumElemsPerBankGroup == 8 and std::is_same_v<cd_dtype_t, cutlass::bfloat16_t>, "Invalid type");
+                                    cute::SM100_TMEM_LOAD_32dp32b8x::copy(tmem_addr,
+                                        values[0], values[1], values[2], values[3],
+                                        values[4], values[5], values[6], values[7]);
+                                    cutlass::arch::fence_view_async_tmem_load();
+                                    st_shared(smem_ptr,
+                                            cast_into_bf16_and_pack(values[0], values[1]),
+                                            cast_into_bf16_and_pack(values[2], values[3]),
+                                            cast_into_bf16_and_pack(values[4], values[5]),
+                                            cast_into_bf16_and_pack(values[6], values[7]));
+                                }
                             } // !swap_ab
                             else 
                             {
-                                if constexpr (kSwizzleCDMode == 16) {
-                                    // Source and destination memory address
-                                    uint32_t tmem_addr = accum_stage_idx * kNumMWaves * BLOCK_N +               // Accumulator offset
-                                                    w * BLOCK_N +                                          // Wave offset
-                                                    s * STORE_BLOCK_N + i * kNumElemsPerBankGroup;         // In-block offset
-                                    // Load from tensor memory, store into shared memory
-                                    uint32_t values[kNumElemsPerBankGroup];
-                                    if constexpr (std::is_same_v<cd_dtype_t, float>) {
-                                        // For FP32 output, read and store
-                                        DG_STATIC_ASSERT(kNumElemsPerBankGroup == 4, "Invalid type");
-                                        cute::SM100_TMEM_LOAD_32dp32b4x::copy(tmem_addr,
-                                            values[0], values[1], values[2], values[3]);
-                                        cutlass::arch::fence_view_async_tmem_load();
+                                // // Source and destination memory address
+                                // uint32_t tmem_addr = accum_stage_idx * kNumMWaves * BLOCK_N +               // Accumulator offset
+                                //                 w * BLOCK_N +                                          // Wave offset
+                                //                 s * STORE_BLOCK_N + i * kNumElemsPerBankGroup;         // In-block offset
+                                // // Load from tensor memory, store into shared memory
+                                // uint32_t values[kNumElemsPerBankGroup];
+                                // if constexpr (std::is_same_v<cd_dtype_t, float>) {
+                                //     // For FP32 output, read and store
+                                //     DG_STATIC_ASSERT(kNumElemsPerBankGroup == 4, "Invalid type");
+                                //     cute::SM100_TMEM_LOAD_32dp32b4x::copy(tmem_addr,
+                                //         values[0], values[1], values[2], values[3]);
+                                //     cutlass::arch::fence_view_async_tmem_load();
 
-                                        // TODO: transpose store smem kernel
-                                        // st_shared(smem_ptr, values[0], values[1], values[2], values[3]);
-                                    } else {
-                                        // For BF16 output, read, cast and store
-                                        DG_STATIC_ASSERT(kNumElemsPerBankGroup == 8 and std::is_same_v<cd_dtype_t, cutlass::bfloat16_t>, "Invalid type");
-                                        cute::SM100_TMEM_LOAD_32dp32b8x::copy(tmem_addr,
-                                            values[0], values[1], values[2], values[3],
-                                            values[4], values[5], values[6], values[7]);
-                                        cutlass::arch::fence_view_async_tmem_load();
+                                //     // TODO: transpose store smem kernel
+                                //     // st_shared(smem_ptr, values[0], values[1], values[2], values[3]);
+                                // } else {
+                                //     // For BF16 output, read, cast and store
+                                //     DG_STATIC_ASSERT(kNumElemsPerBankGroup == 8 and std::is_same_v<cd_dtype_t, cutlass::bfloat16_t>, "Invalid type");
+                                //     cute::SM100_TMEM_LOAD_32dp32b8x::copy(tmem_addr,
+                                //         values[0], values[1], values[2], values[3],
+                                //         values[4], values[5], values[6], values[7]);
+                                //     cutlass::arch::fence_view_async_tmem_load();
 
-                                        st_shared_bf16_column(smem_cd[tma_stage_idx], values, STORE_BLOCK_M, epilogue_thread_idx);
-                                    }
-                                }
-                                else { // swizzle_cd_mode != 16
-                                    // TODO: implement this
-                                }
+                                //     st_shared_bf16_column(smem_cd[tma_stage_idx], values, STORE_BLOCK_M, epilogue_thread_idx);
+                                // }
 
+                                // swapab actual swizzle_cd_mode is always 128. warp0 and warp1 are located in the same Swizzled 128B
+                                auto row = lane_idx % 8;  // thread 0 - 31
+                                auto col = (epilogue_warp_idx % 2) * 4 + lane_idx / 8;
+                                col ^= row;
+                                // Source and destination memory address
+                                uint32_t tmem_addr = accum_stage_idx * kNumMWaves * BLOCK_N +               // Accumulator offset
+                                                w * BLOCK_N +                                          // Wave offset
+                                                s * STORE_BLOCK_N + i * kNumElemsPerBankGroup;         // In-block offset
+                                auto smem_ptr = reinterpret_cast<uint8_t*>(smem_cd[tma_stage_idx]) +        // Base pointer
+                                                epilogue_warp_idx/2 * STORE_BLOCK_N * 128 +                   // Warp offset
+                                                i * 8 * 128 +                                               // original bank offset
+                                                row * (kNumBankGroupBytes * 8) + col * kNumBankGroupBytes;  // In-atom offset
+                                
+                                // Load from tensor memory, store into shared memory
+                                uint32_t values[kNumElemsPerBankGroup];
+                                // For BF16 output, read, cast and store
+                                DG_STATIC_ASSERT(kNumElemsPerBankGroup == 8 and std::is_same_v<cd_dtype_t, cutlass::bfloat16_t>, "Invalid type");
+                                
+                                cute::SM100_TMEM_LOAD_16dp256b1x::copy(tmem_addr,
+                                    values[0], values[1], values[2], values[3]);
+                                tmem_addr |= 0x00100000;  // 给tmem_addr的高16位添加偏移16
+                                cute::SM100_TMEM_LOAD_16dp256b1x::copy(tmem_addr,
+                                    values[4], values[5], values[6], values[7]);
+                                cutlass::arch::fence_view_async_tmem_load();
+
+                                deep_gemm::sm90::SM90_U32x4_STSM_T<int32_t>::copy(
+                                    cast_into_bf16_and_pack(values[0], values[1]),
+                                        cast_into_bf16_and_pack(values[2], values[3]),
+                                        cast_into_bf16_and_pack(values[4], values[5]),
+                                        cast_into_bf16_and_pack(values[6], values[7]),
+                                    smem_ptr
+                                ); 
                             }
                         }
 
@@ -645,7 +638,9 @@ sm100_fp8_gemm_1d1d_impl(int* grouped_layout,
                                 cute_tma_t::copy(&tensor_map_d, smem_cd[tma_stage_idx], n_idx, m_idx);
                             }
                             else {
+                                // swapab case actual swizzle_cd=128B
                                 cute_tma_t::copy(&tensor_map_d, smem_cd[tma_stage_idx], m_idx, n_idx);
+                                cute_tma_t::copy(&tensor_map_d, reinterpret_cast<uint8_t*>(smem_cd[tma_stage_idx]) + STORE_BLOCK_N * 128, m_idx + 128 / sizeof(cd_dtype_t), n_idx);
                             }
                             cute::tma_store_arrive();
                         }

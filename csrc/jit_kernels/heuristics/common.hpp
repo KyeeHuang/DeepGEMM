@@ -106,8 +106,7 @@ static SharedMemoryConfig get_smem_config(const KernelType& kernel_type,
     const int& load_block_n = ArchSpec::get_ab_load_block_n(multicast_config, block_n);
     const int& swizzle_a_mode = get_swizzle_mode(major_a == cute::UMMA::Major::K ? block_k : load_block_m, ab_elem_size);
     const int& swizzle_b_mode = get_swizzle_mode(major_b == cute::UMMA::Major::K ? block_k : load_block_n, ab_elem_size);
-    // const int& swizzle_cd_mode = get_swizzle_mode(block_n, cd_elem_size);
-    const int& swizzle_cd_mode = swap_ab ? 16 : get_swizzle_mode(block_n, cd_elem_size);
+    const int& swizzle_cd_mode = get_swizzle_mode(block_n, cd_elem_size);
 
     // Different archs have different epilogue pipelines
     const int& smem_cd = ArchSpec::get_smem_cd_size(kernel_type, block_m, block_n, swizzle_cd_mode, cd_dtype);

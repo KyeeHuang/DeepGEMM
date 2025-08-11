@@ -111,8 +111,8 @@ void fp8_gemm_ntt(const std::pair<torch::Tensor, torch::Tensor>& a,
     // Transform SFA and SFB into compute-required layout
     if (not recipe.has_value())
         recipe = get_default_recipe(a.second.scalar_type(), b.second.scalar_type());
-    const auto& sfa = transform_sf_into_required_layout(a.second, m, k, std::nullopt, recipe.value(),  true, disable_ue8m0_cast);
-    const auto& sfb = transform_sf_into_required_layout(b.second, n, k, std::nullopt, recipe.value(), false, disable_ue8m0_cast);
+    const auto& sfa = layout::transform_sf_into_required_layout(a.second, m, k, recipe.value(), std::nullopt,  true, disable_ue8m0_cast);
+    const auto& sfb = layout::transform_sf_into_required_layout(b.second, n, k, recipe.value(), std::nullopt, false, disable_ue8m0_cast);
 
     // Dispatch into different implements
     const auto& arch_major = device_runtime->get_arch_major();
