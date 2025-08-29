@@ -474,7 +474,7 @@ static void register_apis(pybind11::module_& m) {
     m.def("fp8_gemm_ntt", &fp8_gemm_ntt,
           py::arg("a"), py::arg("b"), py::arg("d"),
           py::arg("c") = std::nullopt, py::arg("recipe") = std::nullopt,
-          py::arg("compiled_dims") = "nk",
+          py::arg("compiled_dims") = "mk",
           py::arg("disable_ue8m0_cast") = false);
     m.def("fp8_gemm_nn", &fp8_gemm_nn,
           py::arg("a"), py::arg("b"), py::arg("d"),
