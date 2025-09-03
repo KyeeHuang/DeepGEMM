@@ -4,7 +4,9 @@ from . import jit
 from .jit_kernels import (
     gemm_fp8_fp8_bf16_nt,
     m_grouped_gemm_fp8_fp8_bf16_nt_contiguous,
+    m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_per_tensor,
     m_grouped_gemm_fp8_fp8_bf16_nt_masked,
+    m_grouped_gemm_fp8_fp8_bf16_nt_masked_per_tensor,
     wgrad_gemm_fp8_fp8_fp32_nt,
     k_grouped_wgrad_gemm_fp8_fp8_fp32_nt,
     ceil_div,

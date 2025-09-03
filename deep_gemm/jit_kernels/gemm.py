@@ -34,7 +34,7 @@ def get_block_n_padding_for_smem_d(block_n: int) -> int:
 
 
 def get_smem_config(num_stages: int, k: int, block_m: int, block_n: int, block_k: int = 128,        
-                    is_fp32_out: bool = False, is_wgrad: bool = False) -> Tuple[int, int, int]:
+                    is_fp32_out: bool = False, is_wgrad: bool = False, is_per_tensor: bool = False) -> Tuple[int, int, int]:
     assert block_k == 128
 
     # Try swizzle first, as it does not waste shared memory
@@ -45,10 +45,11 @@ def get_smem_config(num_stages: int, k: int, block_m: int, block_n: int, block_k
     # NOTES: `scales_b` in a total manner or per-stage manner
     smem_d = block_m * (block_n + block_n_padding) * (4 if is_fp32_out else 2)
     smem_a_per_stage = block_m * block_k
-    smem_scales_a_per_stage = block_m * 4
+    smem_scales_a_per_stage = block_m * 4 if not is_per_tensor else 0
     smem_b_per_stage = block_n * block_k
     smem_scales_b_per_stage = ceil_div(block_n * 4, block_k) * block_k if is_wgrad else 0
     smem_scales_b = ceil_div(k, block_k) * 4 if not is_wgrad else 0
+    smem_scales_b = 1 * 4 if is_per_tensor else smem_scales_b
     smem_barrier = num_stages * 8 * 2
 
     smem_size = 0
@@ -57,7 +58,7 @@ def get_smem_config(num_stages: int, k: int, block_m: int, block_n: int, block_k
     smem_size += num_stages * smem_scales_a_per_stage
     smem_size += num_stages * smem_b_per_stage
     smem_size += num_stages * smem_scales_b_per_stage
-    smem_size += ceil_div(smem_scales_b * (1 if block_k % block_n == 0 else 2), 8) * 8
+    smem_size += ceil_div(smem_scales_b * (1 if block_k % block_n == 0 or is_per_tensor else 2), 8) * 8
     smem_size += smem_barrier
 
     # Swizzle and padding are not compatible
@@ -69,7 +70,7 @@ def get_smem_config(num_stages: int, k: int, block_m: int, block_n: int, block_k
 @lru_cache(maxsize=None)
 def get_best_configs(m: int, n: int, k: int, num_groups: int, num_sms: int,
                      is_grouped_contiguous: bool = False, is_grouped_masked: bool = False,
-                     is_fp32_out: bool = False, is_wgrad: bool = False) -> \
+                     is_fp32_out: bool = False, is_wgrad: bool = False, is_per_tensor: bool = False) -> \
         Tuple[int, int, int, int, Tuple[int, bool], Tuple[int, int, int]]:
     if not is_grouped_contiguous:
         block_ms = (64, 128, ) + ((256, ) if not is_fp32_out else ())
@@ -119,7 +120,7 @@ def get_best_configs(m: int, n: int, k: int, num_groups: int, num_sms: int,
         # Unrolling both stages and `num_former_iters` will cause large code size
         stage_candidates = tuple(filter(lambda s: s <= max(k // 128, 1), (4, 3, 2, 1)))
     for num_stages in stage_candidates:
-        best_smem_config = get_smem_config(num_stages, k, best_block_m, best_block_n, is_fp32_out=is_fp32_out, is_wgrad=is_wgrad)
+        best_smem_config = get_smem_config(num_stages, k, best_block_m, best_block_n, is_fp32_out=is_fp32_out, is_wgrad=is_wgrad, is_per_tensor=is_per_tensor)
         if best_smem_config[0] <= sm90_capacity:
             best_num_stages = num_stages
             break

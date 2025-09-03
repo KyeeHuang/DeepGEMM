@@ -227,6 +227,98 @@ static void __instantiate_kernel() {{
         )
         return cbd.cuLaunchKernelEx(config, kernel, (arg_values, arg_types), 0)
 
+class FP8GemmPerTensorRuntime(Runtime):
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+
+    @staticmethod
+    def generate(kwargs: Dict[str, Any]) -> str:
+        code = f'''
+#ifdef __CUDACC_RTC__
+#include <deep_gemm/nvrtc_std.cuh>
+#else
+#include <cuda.h>
+#include <string>
+#endif
+
+#include <cuda_bf16.h>
+#include <cuda_fp8.h>
+
+#include <deep_gemm/fp8_gemm.cuh>
+
+using namespace deep_gemm;
+
+static void __instantiate_kernel() {{
+    auto ptr = reinterpret_cast<void*>(&fp8_gemm_per_tensor_kernel<
+        {kwargs['N']},
+        {kwargs['K']},
+        {kwargs['BLOCK_M']},
+        {kwargs['BLOCK_N']},
+        {kwargs['BLOCK_K']},
+        {kwargs['BLOCK_N_PADDING']},
+        {kwargs['SWIZZLE_D_MODE']},
+        {kwargs['NUM_GROUPS']},
+        {kwargs['NUM_STAGES']},
+        {kwargs['NUM_TMA_THREADS']},
+        {kwargs['NUM_MATH_THREADS_PER_GROUP']},
+        {kwargs['NUM_TMA_MULTICAST']},
+        {'true' if kwargs['IS_TMA_MULTICAST_ON_A'] else 'false'},
+        GemmType::{kwargs['GEMM_TYPE']}
+      >);
+}};
+'''
+        if int(os.getenv('DG_JIT_DEBUG', 0)):
+            print(f'Generated FP8 GEMM per tensor code:\n{code}')
+        return code
+
+    # noinspection PyMethodOverriding
+    @staticmethod
+    def launch(kernel: cbd.CUkernel, kwargs: Dict[str, Any]) -> cbd.CUresult:
+        num_tma_threads = 128
+        num_math_threads_per_group = 128
+
+        result = cbd.cuKernelSetAttribute(cbd.CUfunction_attribute.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                                          kwargs['SMEM_SIZE'], kernel, cbd.CUdevice(kwargs['DEVICE_INDEX']))[0]
+        assert result == cbd.CUresult.CUDA_SUCCESS, f'Failed to set max dynamic shared memory size: {result}'
+
+        attr_val = cbd.CUlaunchAttributeValue()
+        attr_val.clusterDim.x = kwargs['NUM_TMA_MULTICAST']
+        attr_val.clusterDim.y = 1
+        attr_val.clusterDim.z = 1
+        attr = cbd.CUlaunchAttribute()
+        attr.id = cbd.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION
+        attr.value = attr_val
+
+        config = cbd.CUlaunchConfig()
+        config.numAttrs = 1
+        config.attrs = [attr]
+        config.gridDimX = kwargs['NUM_SMS']
+        config.gridDimY = 1
+        config.gridDimZ = 1
+        config.blockDimX = get_num_threads_per_sm(num_tma_threads, num_math_threads_per_group, kwargs['BLOCK_M'])
+        config.blockDimY = 1
+        config.blockDimZ = 1
+        config.sharedMemBytes = kwargs['SMEM_SIZE']
+        config.hStream = kwargs['STREAM']
+
+        arg_values = (
+            kwargs['SCALES_B'].data_ptr(),
+            kwargs['GROUPED_LAYOUT'].data_ptr(),
+            kwargs['M'],
+            kwargs['TENSOR_MAP_A'],
+            kwargs['TENSOR_MAP_B'],
+            kwargs['TENSOR_MAP_D'],
+        )
+        arg_types = (
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            None,
+            None,
+            None,
+        )
+        return cbd.cuLaunchKernelEx(config, kernel, (arg_values, arg_types), 0)
+
 
 class FP8WGradGemmRuntime(Runtime):
     def __init__(self, path: str) -> None:
