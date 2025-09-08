@@ -666,7 +666,11 @@ fp8_gemm_per_tensor_kernel(float* scales_b, int* grouped_layout,
             //     auto local_scales_b = scales_b + scheduler.curr_group_idx;
             //     st_shared(smem_scales_b, __ldg(local_scales_b));
             // }
-            auto local_scales_b = scales_b + scheduler.curr_group_idx;
+            int curren_group_idx = scheduler.curr_group_idx;
+            if constexpr (kGemmType == GemmType::GroupedContiguous) {
+                curren_group_idx = __ldg(scheduler.grouped_layout + m_block_idx * BLOCK_M);
+            }
+            auto local_scales_b = scales_b + curren_group_idx;
             float scale_b_0 = __ldg(local_scales_b);
             cutlass::arch::NamedBarrier(kNumMathThreads).sync();
 
