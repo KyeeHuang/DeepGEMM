@@ -296,7 +296,7 @@ def test_m_grouped_gemm_contiguous_per_tensor() -> None:
         deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_per_tensor(x_fp8, y_fp8, out, m_indices)
         out = torch.where((m_indices == -1).unsqueeze(1), torch.zeros_like(out), out)
         diff = calc_diff(out, ref_out)
-        assert diff < 0.005, f'{m=}, {k=}, {n=}, {diff:.5f}'  # NOTE: this is a bit relaxed for per-tensor kernel
+        assert diff < 0.001, f'{m=}, {k=}, {n=}, {diff:.5f}'
 
         # noinspection PyShadowingNames
         def test_func():
