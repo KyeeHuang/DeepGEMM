@@ -34,35 +34,56 @@ def get_block_n_padding_for_smem_d(block_n: int) -> int:
 
 
 def get_smem_config(num_stages: int, k: int, block_m: int, block_n: int, block_k: int = 128,        
-                    is_fp32_out: bool = False, is_wgrad: bool = False, is_per_tensor: bool = False) -> Tuple[int, int, int]:
+                    is_fp32_out: bool = False, is_wgrad: bool = False, is_per_tensor: bool = False, is_swapab: bool = False) -> Tuple[int, int, int]:
     assert block_k == 128
+    assert (not is_swapab) or (is_swapab and is_per_tensor)
 
-    # Try swizzle first, as it does not waste shared memory
-    swizzle_mode = get_swizzle_mode(block_n)
-    block_n_padding = get_block_n_padding_for_smem_d(
-        block_n) if swizzle_mode == 0 else 0
+    if not is_swapab:
+        # Try swizzle first, as it does not waste shared memory
+        swizzle_mode = get_swizzle_mode(block_n)
+        block_n_padding = get_block_n_padding_for_smem_d(
+            block_n) if swizzle_mode == 0 else 0
 
-    # NOTES: `scales_b` in a total manner or per-stage manner
-    smem_d = block_m * (block_n + block_n_padding) * (4 if is_fp32_out else 2)
-    smem_a_per_stage = block_m * block_k
-    smem_scales_a_per_stage = block_m * 4 if not is_per_tensor else 0
-    smem_b_per_stage = block_n * block_k
-    smem_scales_b_per_stage = ceil_div(block_n * 4, block_k) * block_k if is_wgrad else 0
-    smem_scales_b = ceil_div(k, block_k) * 4 if not is_wgrad else 0
-    smem_scales_b = 1 * 4 if is_per_tensor else smem_scales_b
-    smem_barrier = num_stages * 8 * 2
+        # NOTES: `scales_b` in a total manner or per-stage manner
+        smem_d = block_m * (block_n + block_n_padding) * (4 if is_fp32_out else 2)
+        smem_a_per_stage = block_m * block_k
+        smem_scales_a_per_stage = block_m * 4 if not is_per_tensor else 0
+        smem_b_per_stage = block_n * block_k
+        smem_scales_b_per_stage = ceil_div(block_n * 4, block_k) * block_k if is_wgrad else 0
+        smem_scales_b = ceil_div(k, block_k) * 4 if not is_wgrad else 0
+        smem_scales_b = 1 * 4 if is_per_tensor else smem_scales_b
+        smem_barrier = num_stages * 8 * 2
 
-    smem_size = 0
-    smem_size += smem_d
-    smem_size += num_stages * smem_a_per_stage
-    smem_size += num_stages * smem_scales_a_per_stage
-    smem_size += num_stages * smem_b_per_stage
-    smem_size += num_stages * smem_scales_b_per_stage
-    smem_size += ceil_div(smem_scales_b * (1 if block_k % block_n == 0 or is_per_tensor else 2), 8) * 8
-    smem_size += smem_barrier
+        smem_size = 0
+        smem_size += smem_d
+        smem_size += num_stages * smem_a_per_stage
+        smem_size += num_stages * smem_scales_a_per_stage
+        smem_size += num_stages * smem_b_per_stage
+        smem_size += num_stages * smem_scales_b_per_stage
+        smem_size += ceil_div(smem_scales_b * (1 if block_k % block_n == 0 or is_per_tensor else 2), 8) * 8
+        smem_size += smem_barrier
 
-    # Swizzle and padding are not compatible
-    assert int(swizzle_mode > 0) + int(block_n_padding > 0) <= 1
+        # Swizzle and padding are not compatible
+        assert int(swizzle_mode > 0) + int(block_n_padding > 0) <= 1
+    else:
+        smem_d = block_n * block_m * 2
+        smem_a_per_stage = block_m * block_k # weight
+        smem_scales_a = ceil_div(block_m, 128) * ceil_div(k, block_k) * 4 if not is_per_tensor else 1 * 4 # weight scales
+        smem_b_per_stage = block_n * block_k # act
+        smem_scales_b_per_stage = ceil_div(block_n * 4, 128) * 128 if not is_per_tensor else 0  # act scales,tma 128B对齐
+        smem_barrier = num_stages * 8 * 2
+
+        smem_size = 0
+        smem_size += smem_d
+        smem_size += num_stages * smem_a_per_stage
+        smem_size += num_stages * smem_b_per_stage
+        smem_size += num_stages * smem_scales_b_per_stage
+        smem_size += ceil_div(smem_scales_a, 8) * 8
+        smem_size += smem_barrier
+
+        # TMA swizzle 128B  bm=64,128,256
+        swizzle_mode = get_swizzle_mode(block_m)
+        block_n_padding = 0
 
     return smem_size, swizzle_mode, block_n_padding
 
@@ -70,13 +91,20 @@ def get_smem_config(num_stages: int, k: int, block_m: int, block_n: int, block_k
 @lru_cache(maxsize=None)
 def get_best_configs(m: int, n: int, k: int, num_groups: int, num_sms: int,
                      is_grouped_contiguous: bool = False, is_grouped_masked: bool = False,
-                     is_fp32_out: bool = False, is_wgrad: bool = False, is_per_tensor: bool = False) -> \
+                     is_fp32_out: bool = False, is_wgrad: bool = False, is_per_tensor: bool = False, is_swapab: bool = False) -> \
         Tuple[int, int, int, int, Tuple[int, bool], Tuple[int, int, int]]:
+    
+    # NOTES: swapab is only supported for grouped masked and per-tensor
+    assert (not is_swapab) or (is_swapab and is_grouped_masked and is_per_tensor)
+    
     if not is_grouped_contiguous:
         block_ms = (64, 128, ) + ((256, ) if not is_fp32_out else ())
     else:
         block_ms = (get_m_alignment_for_contiguous_layout(), )
     block_ns = tuple(range(16, 129, 8)) + ((136, 152, ) if is_wgrad else (144, 160, ))
+
+    if is_swapab:
+        block_ms = (64, 128)
     
     # Avoid bank conflicts for FP32 output
     if is_fp32_out:
@@ -120,7 +148,7 @@ def get_best_configs(m: int, n: int, k: int, num_groups: int, num_sms: int,
         # Unrolling both stages and `num_former_iters` will cause large code size
         stage_candidates = tuple(filter(lambda s: s <= max(k // 128, 1), (4, 3, 2, 1)))
     for num_stages in stage_candidates:
-        best_smem_config = get_smem_config(num_stages, k, best_block_m, best_block_n, is_fp32_out=is_fp32_out, is_wgrad=is_wgrad, is_per_tensor=is_per_tensor)
+        best_smem_config = get_smem_config(num_stages, k, best_block_m, best_block_n, is_fp32_out=is_fp32_out, is_wgrad=is_wgrad, is_per_tensor=is_per_tensor, is_swapab=is_swapab)
         if best_smem_config[0] <= sm90_capacity:
             best_num_stages = num_stages
             break
@@ -140,6 +168,19 @@ def get_best_configs(m: int, n: int, k: int, num_groups: int, num_sms: int,
         if m >= 512 and is_multicast_legal[i]:
             best_tma_multicast_config = (2, i == 'A')
             break
+    
+    if is_swapab:
+        # Decide the number of TMA multicasts and whether broadcast on A
+        best_tma_multicast_config = (1, True)
+        # For grouped masked TMA multicast, only B(act) is supported, and the number of blocks in the M direction must be even
+        is_multicast_legal = {
+        'Act': is_tma_multicast_legal(m, best_block_m, 2, num_sms, is_grouped_masked), # act
+        'W': is_tma_multicast_legal(n, best_block_n, 2, num_sms) and not is_grouped_masked, # weight
+        }
+        for i in ('W', 'Act') if best_block_m > best_block_n else ('Act', 'W'):
+            if n >= 512 and is_multicast_legal[i]:
+                best_tma_multicast_config = (2, i == 'Act')
+                break
 
     # Recompute the minimal number of SMs required
     # NOTES: less L2 cache usage and less GPU frequency drop

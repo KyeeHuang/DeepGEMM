@@ -315,12 +315,13 @@ def test_m_grouped_gemm_masked() -> None:
 
     # for num_groups, expected_m_per_group in ((1, 1024), (2, 512), (4, 256)):
     # for num_groups, expected_m_per_group in ((32, 8192*8//32), (32, 8192)):
-    for num_groups, expected_m_per_group in ((32, 96*8//32), (32, 128*8//32)):
+    for num_groups, expected_m_per_group in ((32, 4), (32, 16), (32, 24), (32, 32), (32, 48), (32, 64), (32, 80), (32, 96), 
+                                            (32, 112), (32, 128), (32, 144), (32, 160), (32, 176), (32, 192)):
         for k, n in ((7168, 4096), (2048, 7168), ):
             # Test correctness
             for i in range(10):
-                # x_fp8, y_fp8, masked_m, out, ref_out = construct_masked_grouped(num_groups, 4096, expected_m_per_group, k, n)
-                x_fp8, y_fp8, masked_m, out, ref_out = construct_masked_grouped(num_groups, 8192, expected_m_per_group, k, n)
+                x_fp8, y_fp8, masked_m, out, ref_out = construct_masked_grouped(num_groups, 4096, expected_m_per_group, k, n)
+                # x_fp8, y_fp8, masked_m, out, ref_out = construct_masked_grouped(num_groups, 8192, expected_m_per_group, k, n)
                 deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked(x_fp8, y_fp8, out, masked_m, expected_m_per_group)
                 for j in range(num_groups):
                     diff = calc_diff(out[j, :masked_m[j].item()], ref_out[j, :masked_m[j].item()])
@@ -343,13 +344,13 @@ def test_m_grouped_gemm_masked_per_tensor() -> None:
     print('Testing grouped masked GEMM per tensor:')
 
     # for num_groups, expected_m_per_group in ((1, 1024), (2, 512), (4, 256)):
-    # for num_groups, expected_m_per_group in ((32, 8192*8//32), (32, 8192)):
-    for num_groups, expected_m_per_group in ((32, 96*8//32), (32, 128*8//32)):
+    for num_groups, expected_m_per_group in ((32, 4), (32, 16), (32, 24), (32, 32), (32, 48), (32, 64), (32, 80), (32, 96), 
+                                            (32, 112), (32, 128), (32, 144), (32, 160), (32, 176), (32, 192)):
         for k, n in ((7168, 4096), (2048, 7168), ):
             # Test correctness
             for i in range(10):
-                # x_fp8, y_fp8, masked_m, out, ref_out = construct_masked_grouped_per_tensor(num_groups, 4096, expected_m_per_group, k, n)
-                x_fp8, y_fp8, masked_m, out, ref_out = construct_masked_grouped_per_tensor(num_groups, 8192, expected_m_per_group, k, n)
+                x_fp8, y_fp8, masked_m, out, ref_out = construct_masked_grouped_per_tensor(num_groups, 4096, expected_m_per_group, k, n)
+                # x_fp8, y_fp8, masked_m, out, ref_out = construct_masked_grouped_per_tensor(num_groups, 8192, expected_m_per_group, k, n)
                 deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked_per_tensor(x_fp8, y_fp8, out, masked_m, expected_m_per_group)
                 for j in range(num_groups):
                     diff = calc_diff(out[j, :masked_m[j].item()], ref_out[j, :masked_m[j].item()])
@@ -358,6 +359,37 @@ def test_m_grouped_gemm_masked_per_tensor() -> None:
             # noinspection PyShadowingNames
             def test_func():
                 deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked_per_tensor(x_fp8, y_fp8, out, masked_m, expected_m_per_group)
+
+            # Test performance with fixed shapes
+            # noinspection PyUnboundLocalVariable
+            valid_m = masked_m.sum().item()
+            t = bench_kineto(test_func, 'fp8_gemm', suppress_kineto_output=True)
+            print(f' > Perf ({num_groups=}, expected_m_per_group={expected_m_per_group:4}, n={n:4}, k={k:4}): {t * 1e6:4.0f} us | '
+                  f'throughput: {2 * valid_m * n * k / t / 1e12:4.0f} TFLOPS, '
+                  f'{(valid_m * k + num_groups * k * n + valid_m * n * 2) / 1e9 / t:4.0f} GB/s')
+    print()
+
+def test_m_grouped_gemm_masked_per_tensor_swapab() -> None:
+    print('Testing grouped masked GEMM per tensor (swapab):')
+
+    # for num_groups, expected_m_per_group in ((1, 1024), (2, 512), (4, 256)):
+    for num_groups, expected_m_per_group in ((32, 4), (32, 16), (32, 24), (32, 32), (32, 48), (32, 64), (32, 80), (32, 96), 
+                                            (32, 112), (32, 128), (32, 144), (32, 160), (32, 176), (32, 192)):
+        for k, n in ((7168, 4096), (2048, 7168), ):
+            # Test correctness
+            for i in range(10):
+                x_fp8, y_fp8, masked_m, out, ref_out = construct_masked_grouped_per_tensor(num_groups, 4096, expected_m_per_group, k, n)
+                # x_fp8, y_fp8, masked_m, out, ref_out = construct_masked_grouped_per_tensor(num_groups, 8192, expected_m_per_group, k, n)
+                deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked_per_tensor_swapab(y_fp8, x_fp8, out, masked_m, expected_m_per_group)
+                for j in range(num_groups):
+                    # print(out[j, :masked_m[j].item()])
+                    # print(ref_out[j, :masked_m[j].item()])
+                    diff = calc_diff(out[j, :masked_m[j].item()], ref_out[j, :masked_m[j].item()])
+                    assert diff < 0.001, f'{expected_m_per_group=}, {k=}, {n=}, {j=}, masked_m={masked_m[j]}, {num_groups=}, {diff:.5f}'
+
+            # noinspection PyShadowingNames
+            def test_func():
+                deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked_per_tensor_swapab(y_fp8, x_fp8, out, masked_m, expected_m_per_group)
 
             # Test performance with fixed shapes
             # noinspection PyUnboundLocalVariable
@@ -435,10 +467,11 @@ if __name__ == '__main__':
     print(f' > {deep_gemm.__path__}\n')
 
     # test_gemm()
-    test_m_grouped_gemm_contiguous()
-    test_m_grouped_gemm_contiguous_per_tensor()
+    # test_m_grouped_gemm_contiguous()
+    # test_m_grouped_gemm_contiguous_per_tensor()
     test_m_grouped_gemm_masked()
     test_m_grouped_gemm_masked_per_tensor()
+    test_m_grouped_gemm_masked_per_tensor_swapab()
 
     # test_wgrad_gemm()
     # test_k_grouped_wgrad_gemm()
