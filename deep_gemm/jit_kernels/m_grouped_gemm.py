@@ -152,7 +152,7 @@ def m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_per_tensor(lhs: Tuple[torch.Tensor
     assert lhs_scales.is_contiguous()
     assert rhs_scales.is_contiguous()
 
-    rhs_scales *= lhs_scales
+    # rhs_scales *= lhs_scales
 
     # Do nothing if `m` is zero
     if m == 0:
@@ -347,7 +347,7 @@ def m_grouped_gemm_fp8_fp8_bf16_nt_masked_per_tensor(lhs: Tuple[torch.Tensor, to
     assert lhs_scales.is_contiguous()
     assert rhs_scales.is_contiguous()
 
-    rhs_scales *= lhs_scales
+    # rhs_scales *= lhs_scales
 
     # Auto-tuning with compilation
     num_sms = get_num_sms()
@@ -444,7 +444,7 @@ def m_grouped_gemm_fp8_fp8_bf16_nt_masked_per_tensor_swapab(lhs: Tuple[torch.Ten
     assert lhs_scales.is_contiguous()
     assert rhs_scales.is_contiguous()
 
-    lhs_scales *= rhs_scales
+    # lhs_scales *= rhs_scales
 
     # Auto-tuning with compilation
     num_sms = get_num_sms()
