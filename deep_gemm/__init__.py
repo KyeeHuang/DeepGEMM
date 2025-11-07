@@ -48,6 +48,21 @@ from . import testing
 from . import utils
 from .utils import *
 
+# JIT kernels
+from . import jit
+from .jit_kernels import (
+    gemm_fp8_fp8_bf16_nt,
+    m_grouped_gemm_fp8_fp8_bf16_nt_contiguous,
+    m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_per_tensor,
+    m_grouped_gemm_fp8_fp8_bf16_nt_masked,
+    m_grouped_gemm_fp8_fp8_bf16_nt_masked_per_tensor,
+    m_grouped_gemm_fp8_fp8_bf16_nt_masked_per_tensor_swapab,
+    wgrad_gemm_fp8_fp8_fp32_nt,
+    k_grouped_wgrad_gemm_fp8_fp8_fp32_nt,
+    ceil_div,
+    get_col_major_tma_aligned_tensor,
+    get_m_alignment_for_contiguous_layout
+)
 
 # Initialize CPP modules
 def _find_cuda_home() -> str:
