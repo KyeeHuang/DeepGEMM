@@ -96,7 +96,7 @@ static SharedMemoryConfig get_smem_config(const KernelType& kernel_type,
                                           const int& block_m, const int& block_n, const int& block_k,
                                           const cute::UMMA::Major& major_a, const cute::UMMA::Major& major_b,
                                           const at::ScalarType& ab_dtype, const at::ScalarType& cd_dtype,
-                                          const int& num_stages, const MulticastConfig& multicast_config) {
+                                          const int& num_stages, const MulticastConfig& multicast_config, bool is_per_tensor = false) {
     const int& ab_elem_size = static_cast<int>(c10::elementSize(ab_dtype));
     const int& cd_elem_size = static_cast<int>(c10::elementSize(cd_dtype));
 
@@ -115,8 +115,8 @@ static SharedMemoryConfig get_smem_config(const KernelType& kernel_type,
 
     // SF shared memory
     const auto& [smem_sfa_per_stage, smem_sfb_per_stage] =
-        ArchSpec::get_sf_smem_size_per_stage(kernel_type, block_m, block_n, block_k, ab_dtype, cd_dtype);
-    const int& smem_extra_sfb = ArchSpec::get_extra_sfb_smem_size(m, n, k, block_m, block_n, block_k);
+        ArchSpec::get_sf_smem_size_per_stage(kernel_type, block_m, block_n, block_k, ab_dtype, cd_dtype, is_per_tensor);
+    const int& smem_extra_sfb = ArchSpec::get_extra_sfb_smem_size(m, n, k, block_m, block_n, block_k, is_per_tensor);
 
     // M-barriers and tensor memory pointers
     const int& smem_barrier = ArchSpec::get_barrier_smem_size(num_stages);
@@ -146,7 +146,7 @@ static GemmConfig get_best_config(const GemmType& gemm_type, const KernelType& k
                                   const int& m, const int& n, const int& k, const int& num_groups,
                                   const cute::UMMA::Major& major_a, const cute::UMMA::Major& major_b,
                                   const at::ScalarType& ab_dtype, const at::ScalarType& cd_dtype,
-                                  const bool& with_accumulation, const int& num_sms) {
+                                  const bool& with_accumulation, const int& num_sms, bool is_per_tensor = false) {
     DG_HOST_ASSERT(ab_dtype == torch::kFloat8_e4m3fn or ab_dtype == torch::kBFloat16);
     DG_HOST_ASSERT(cd_dtype == torch::kBFloat16 or cd_dtype == torch::kFloat);
 
@@ -238,7 +238,7 @@ static GemmConfig get_best_config(const GemmType& gemm_type, const KernelType& k
                                                      best_block_m, best_block_n, block_k,
                                                      major_a, major_b,
                                                      ab_dtype, cd_dtype,
-                                                     num_stages, best_multicast_config);
+                                                     num_stages, best_multicast_config, is_per_tensor);
         if (best_smem_config.smem_size <= smem_capacity) {
             best_num_stages = num_stages;
             break;

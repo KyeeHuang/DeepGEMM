@@ -34,6 +34,9 @@ from deep_gemm_cpp import (
     bf16_gemm_tn, bf16_gemm_tt,
     m_grouped_bf16_gemm_nt_contiguous,
     m_grouped_bf16_gemm_nt_masked,
+    # Per Tensor GEMMs
+    m_grouped_fp8_gemm_nt_contiguous_per_tensor,
+    m_grouped_fp8_gemm_nt_masked_per_tensor,
     # Layout kernels
     transform_sf_into_required_layout
 )
@@ -42,6 +45,7 @@ from deep_gemm_cpp import (
 # TODO: remove these later
 fp8_m_grouped_gemm_nt_masked = m_grouped_fp8_gemm_nt_masked
 bf16_m_grouped_gemm_nt_masked = m_grouped_bf16_gemm_nt_masked
+fp8_m_grouped_gemm_nt_masked_per_tensor = m_grouped_fp8_gemm_nt_masked_per_tensor
 
 # Some utils
 from . import testing
