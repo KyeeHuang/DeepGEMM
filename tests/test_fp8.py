@@ -106,7 +106,7 @@ def test_m_grouped_gemm_contiguous_per_tensor() -> None:
 
         for test_alias in (False, True):
             m, a, b, m_indices, d, ref_d = generate_m_grouped_contiguous_per_tensor(num_groups, expected_m_per_group, n, k, major_a, major_b, use_ue8m0=use_ue8m0)
-            func_name = f"m_grouped_fp8_gemm_{(major_opt.lower() if test_alias else 'nt')}_contiguous"
+            func_name = f"m_grouped_fp8_gemm_{(major_opt.lower() if test_alias else 'nt')}_contiguous_per_tensor"
             if test_alias:
                 assert major_a.is_k_major()
                 b = b if major_b.is_k_major() else (b[0].mT, b[1].mT)
@@ -175,7 +175,7 @@ def test_m_grouped_gemm_masked_per_tensor() -> None:
         # Test correctness
         for i in range(10):
             a, b, masked_m, d, ref_d = generate_m_grouped_masked_per_tensor(num_groups, max_m, expected_m_per_group, n, k, use_ue8m0=use_ue8m0)
-            deep_gemm.m_grouped_fp8_gemm_nt_masked(a, b, d, masked_m, expected_m_per_group, disable_ue8m0_cast=disable_ue8m0_cast)
+            deep_gemm.m_grouped_fp8_gemm_nt_masked_per_tensor(a, b, d, masked_m, expected_m_per_group, disable_ue8m0_cast=disable_ue8m0_cast)
             for j in range(num_groups):
                 diff = calc_diff(d[j, :masked_m[j].item()], ref_d[j, :masked_m[j].item()])
                 assert diff < 0.001, f'{max_m=}, {n=}, {k=}, {j=}, masked_m={masked_m[j]}, {kernel_opt}, {num_groups=}, {diff:.5f}'

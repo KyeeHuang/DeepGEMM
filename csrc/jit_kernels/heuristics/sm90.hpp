@@ -88,7 +88,8 @@ struct SM90ArchSpec {
 
     static std::pair<int, int> get_sf_smem_size_per_stage(const KernelType& kernel_type,
                                                           const int& block_m, const int& block_n, const int& block_k,
-                                                          const at::ScalarType& ab_dtype, const at::ScalarType& cd_dtype, is_per_tensor = false) {
+                                                          const at::ScalarType& ab_dtype, const at::ScalarType& cd_dtype,
+                                                          bool is_per_tensor = false) {
         if (ab_dtype == torch::kBFloat16)
             return {0, 0};
 

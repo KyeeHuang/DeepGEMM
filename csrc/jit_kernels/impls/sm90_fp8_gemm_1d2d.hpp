@@ -395,7 +395,7 @@ static void sm90_m_grouped_fp8_gemm_masked_per_tensor_1d2d(const torch::Tensor& 
                                                 config.smem_config.swizzle_cd_mode);
 
     // Launch
-    const SM90FP8Gemm1D2DRuntime::Args& args = {
+    const SM90FP8GemmPerTensor1D2DRuntime::Args& args = {
         .m = m, .n = n, .k = aligned_k,
         .num_groups = num_groups,
         .compiled_dims = compiled_dims,

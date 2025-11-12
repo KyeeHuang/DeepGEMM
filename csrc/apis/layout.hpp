@@ -10,13 +10,17 @@ static torch::Tensor transform_sf_into_required_layout(const torch::Tensor& sf,
                                                        const std::tuple<int, int, int>& recipe,
                                                        const std::optional<int>& num_groups,
                                                        const bool& is_sfa,
-                                                       const bool& disable_ue8m0_cast) {
+                                                       const bool& disable_ue8m0_cast,
+                                                       const bool& is_per_tensor) {
     const auto& gran_mn = is_sfa ? std::get<0>(recipe) : std::get<1>(recipe);
     const auto& gran_k = std::get<2>(recipe);
     const auto& arch_major = device_runtime->get_arch_major();
 
     // Pre-transform checks
-    check_sf_layout(sf, mn, k, gran_mn, gran_k, num_groups);
+    if (is_per_tensor)
+        check_sf_layout(sf, mn, k, gran_mn, gran_k, num_groups, false, false, std::nullopt, true);
+    else
+        check_sf_layout(sf, mn, k, gran_mn, gran_k, num_groups, false, false, std::nullopt, false);
 
     // (FP32, 1, 128) on SM90: transform to TMA-aligned and MN-major
     if (sf.scalar_type() == torch::kFloat and gran_mn == 1 and gran_k == 128 and (arch_major == 9 or disable_ue8m0_cast))
@@ -29,8 +33,12 @@ static torch::Tensor transform_sf_into_required_layout(const torch::Tensor& sf,
     }
 
     // (FP32, 128, 128) on SM90: no need to transform, check shape and contiguous
-    if (sf.scalar_type() == torch::kFloat and gran_mn == 128 and gran_k == 128 and (arch_major == 9 or disable_ue8m0_cast))
+    if (sf.scalar_type() == torch::kFloat and gran_mn == 128 and gran_k == 128 and (arch_major == 9 or disable_ue8m0_cast) and is_per_tensor == false)
         return check_sf_layout(sf, mn, k, gran_mn, gran_k, num_groups, false, true, torch::kFloat);
+
+    // (FP32, 128, 128) per tensor on SM90: no need to transform, check shape and contiguous
+    if (sf.scalar_type() == torch::kFloat and gran_mn == 128 and gran_k == 128 and (arch_major == 9 or disable_ue8m0_cast) and is_per_tensor)
+        return check_sf_layout(sf, mn, k, gran_mn, gran_k, num_groups, false, true, torch::kFloat, true);
 
     // (FP32, 128, 128) on SM100: transform to (INT, 1, 128), TMA-aligned and MN-major
     if (sf.scalar_type() == torch::kFloat and gran_mn == 128 and gran_k == 128 and arch_major == 10) {
@@ -73,7 +81,7 @@ static void register_apis(pybind11::module_& m) {
     m.def("transform_sf_into_required_layout", &transform_sf_into_required_layout,
       py::arg("sf"), py::arg("mn"), py::arg("k"), py::arg("recipe"),
       py::arg("num_groups") = std::nullopt, py::arg("is_sfa") = false,
-      py::arg("disable_ue8m0_cast") = false);
+      py::arg("disable_ue8m0_cast") = false, py::arg("is_per_tensor") = false);
 
     m.def("get_tma_aligned_size", &get_tma_aligned_size);
     m.def("get_mk_alignment_for_contiguous_layout", &get_mk_alignment_for_contiguous_layout);

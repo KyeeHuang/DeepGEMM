@@ -52,8 +52,8 @@ static void fp8_gemm_nt(const std::pair<torch::Tensor, torch::Tensor>& a,
     // Transform SFA and SFB into compute-required layout
     if (not recipe.has_value())
         recipe = get_default_recipe(a.second.scalar_type(), b.second.scalar_type());
-    const auto& sfa = layout::transform_sf_into_required_layout(a.second, m, k, recipe.value(), std::nullopt,  true, disable_ue8m0_cast);
-    const auto& sfb = layout::transform_sf_into_required_layout(b.second, n, k, recipe.value(), std::nullopt, false, disable_ue8m0_cast);
+    const auto& sfa = layout::transform_sf_into_required_layout(a.second, m, k, recipe.value(), std::nullopt,  true, disable_ue8m0_cast, false);
+    const auto& sfb = layout::transform_sf_into_required_layout(b.second, n, k, recipe.value(), std::nullopt, false, disable_ue8m0_cast, false);
 
     // Dispatch into different implements
     const auto& arch_major = device_runtime->get_arch_major();
@@ -139,8 +139,8 @@ static void m_grouped_fp8_gemm_nt_contiguous(const std::pair<torch::Tensor, torc
     // Transform SFA and SFB into compute-required layout
     if (not recipe.has_value())
         recipe = get_default_recipe(a.second.scalar_type(), b.second.scalar_type());
-    const auto& sfa = layout::transform_sf_into_required_layout(a.second, m, k, recipe.value(), std::nullopt,  true, disable_ue8m0_cast);
-    const auto& sfb = layout::transform_sf_into_required_layout(b.second, n, k, recipe.value(),   num_groups, false, disable_ue8m0_cast);
+    const auto& sfa = layout::transform_sf_into_required_layout(a.second, m, k, recipe.value(), std::nullopt,  true, disable_ue8m0_cast, false);
+    const auto& sfb = layout::transform_sf_into_required_layout(b.second, n, k, recipe.value(),   num_groups, false, disable_ue8m0_cast, false);
 
     // Dispatch implementation
     const auto& arch_major = device_runtime->get_arch_major();
@@ -195,11 +195,11 @@ static void m_grouped_fp8_gemm_nt_contiguous_per_tensor(const std::pair<torch::T
     // Transform SFA and SFB into compute-required layout
     if (not recipe.has_value())
         recipe = get_default_recipe(a.second.scalar_type(), b.second.scalar_type());
-    const auto& sfb = layout::transform_sf_into_required_layout(a.second * b.second, n, k, recipe.value(),   num_groups, false, disable_ue8m0_cast);
+    const auto& sfb = layout::transform_sf_into_required_layout(b.second, n, k, recipe.value(),   num_groups, false, disable_ue8m0_cast, true);
 
     // Dispatch implementation
     const auto& arch_major = device_runtime->get_arch_major();
-    if (arch_major == 9 and sfa.scalar_type() == torch::kFloat) {
+    if (arch_major == 9 and sfb.scalar_type() == torch::kFloat) {
         sm90_m_grouped_fp8_gemm_contiguous_per_tensor_1d2d(a.first, b.first, sfb, d, m_indices,
                                                 num_groups, m, n, k, major_a, major_b, compiled_dims);
     } else {
@@ -251,8 +251,8 @@ static void m_grouped_fp8_gemm_nt_masked(const std::pair<torch::Tensor, torch::T
     // Transform scaling factors
     if (not recipe.has_value())
         recipe = get_default_recipe(a.second.scalar_type(), b.second.scalar_type());
-    const auto& sfa = layout::transform_sf_into_required_layout(a.second, m, k, recipe.value(), num_groups,  true, disable_ue8m0_cast);
-    const auto& sfb = layout::transform_sf_into_required_layout(b.second, n, k, recipe.value(), num_groups, false, disable_ue8m0_cast);
+    const auto& sfa = layout::transform_sf_into_required_layout(a.second, m, k, recipe.value(), num_groups,  true, disable_ue8m0_cast, false);
+    const auto& sfb = layout::transform_sf_into_required_layout(b.second, n, k, recipe.value(), num_groups, false, disable_ue8m0_cast, false);
 
     // Dispatch implementation
     const auto& arch_major = device_runtime->get_arch_major();
@@ -303,11 +303,11 @@ static void m_grouped_fp8_gemm_nt_masked_per_tensor(const std::pair<torch::Tenso
     // Transform scaling factors
     if (not recipe.has_value())
         recipe = get_default_recipe(a.second.scalar_type(), b.second.scalar_type());
-    const auto& sfb = layout::transform_sf_into_required_layout(a.second * b.second, n, k, recipe.value(), num_groups, false, disable_ue8m0_cast);
+    const auto& sfb = layout::transform_sf_into_required_layout(b.second, n, k, recipe.value(), num_groups, false, disable_ue8m0_cast, true);
 
     // Dispatch implementation
     const auto& arch_major = device_runtime->get_arch_major();
-    if (arch_major == 9 and sfa.scalar_type() == torch::kFloat) {
+    if (arch_major == 9 and sfb.scalar_type() == torch::kFloat) {
         sm90_m_grouped_fp8_gemm_masked_per_tensor_1d2d(a.first, b.first, sfb, d, masked_m,
                                             num_groups, m, n, k, expected_m, major_a, major_b, compiled_dims);
     } else {

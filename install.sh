@@ -1,3 +1,5 @@
+pip uninstall -y deep_gemm
+
 # Change current directory into project root
 original_dir=$(pwd)
 script_dir=$(realpath "$(dirname "$0")")

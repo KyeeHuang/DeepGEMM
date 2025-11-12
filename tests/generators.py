@@ -223,6 +223,9 @@ def generate_m_grouped_contiguous_per_tensor(num_groups: int, expected_m_per_gro
              torch.empty((num_groups,), device='cuda', dtype=torch.float))
     for i in range(num_groups):
         b_fp8[0][i], b_fp8[1][i] = per_tensor_cast_to_fp8(b[i], use_ue8m0=use_ue8m0)
+        b_fp8[1][i] = b_fp8[1][i] * a_fp8[1]
+    a_fp8 = (a_fp8[0], torch.tensor(1.0, device='cuda', dtype=torch.float).view(1,))
+
     b_fp8 = b_fp8 if major_b.is_k_major() else (b_fp8[0].mT.contiguous().mT, b_fp8[1])
     return m, a_fp8, b_fp8, m_indices, d, ref_d
 
@@ -266,12 +269,18 @@ def generate_m_grouped_masked_per_tensor(num_groups: int, max_m: int, expected_m
     if use_bf16:
         return a, b, masked_m, d, ref_d
 
-    a_fp8 = (torch.empty_like(a, dtype=torch.float8_e4m3fn), torch.empty((1,), device='cuda', dtype=torch.float))
-    b_fp8 = (torch.empty_like(b, dtype=torch.float8_e4m3fn), torch.empty((num_groups,), device='cuda', dtype=torch.float))
-    for i in range(num_groups):
-        a_fp8[0][i], a_fp8[1][i] = per_tensor_cast_to_fp8(a[i], use_ue8m0=use_ue8m0)
-        b_fp8[0][i], b_fp8[1][i] = per_tensor_cast_to_fp8(b[i], use_ue8m0=use_ue8m0)
+    a_fp8 = [torch.empty_like(a, dtype=torch.float8_e4m3fn), torch.empty((1,), device='cuda', dtype=torch.float)]
+    a_view = a.view(-1)
+    a_amax = a_view.abs().float().amax().clamp(1e-4)
+    a_fp8[0] = (a * (448.0 / a_amax)).to(torch.float8_e4m3fn)
+    a_fp8[1] = (a_amax / 448.0).view(1,)
 
+    b_fp8 = [torch.empty_like(b, dtype=torch.float8_e4m3fn), torch.empty((num_groups,), device='cuda', dtype=torch.float)]
+    for i in range(num_groups):
+        b_fp8[0][i], b_fp8[1][i] = per_tensor_cast_to_fp8(b[i], use_ue8m0=use_ue8m0)
+        b_fp8[1][i] = a_fp8[1] * b_fp8[1][i]
+
+    a_fp8 = (a_fp8[0], torch.tensor(1.0, device='cuda', dtype=torch.float).view(1,))
     return a_fp8, b_fp8, masked_m, d, ref_d
 
 

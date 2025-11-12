@@ -111,7 +111,8 @@ struct SM100ArchSpec {
 
     static std::pair<int, int> get_sf_smem_size_per_stage(const KernelType& kernel_type,
                                                           const int& block_m, const int& block_n, const int& block_k,
-                                                          const at::ScalarType& ab_dtype, const at::ScalarType& cd_dtype) {
+                                                          const at::ScalarType& ab_dtype, const at::ScalarType& cd_dtype,
+                                                          bool is_per_tensor = false) {
         if (ab_dtype == torch::kBFloat16)
             return {0, 0};
 
@@ -129,7 +130,8 @@ struct SM100ArchSpec {
     }
 
     static int get_extra_sfb_smem_size(const int& m, const int& n, const int& k,
-                                       const int& block_m, const int& block_n, const int& block_k) {
+                                       const int& block_m, const int& block_n, const int& block_k,
+                                       bool is_per_tensor = false) {
         return 0;
     }
 
